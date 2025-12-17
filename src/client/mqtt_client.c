@@ -12,6 +12,7 @@
 #include "mqtt_client_internal.h"
 #include "../protocol/mqtt_v311/mqtt_v311.h"
 #include "../core/mqtt_packet.h"
+#include "../core/mqtt_varint.h"
 #include "../memory/mqtt_memory.h"
 #include <string.h>
 #include <stdio.h>
@@ -800,6 +801,83 @@ mqtt_error_t mqtt_client_handle_pubcomp(mqtt_client_t *client, uint16_t packet_i
     return MQTT_OK;
 }
 
+/**
+ * @brief Handle an incoming PUBLISH message
+ *
+ * Parses the PUBLISH packet, invokes the on_message callback,
+ * and sends appropriate acknowledgment for QoS 1/2.
+ */
+static mqtt_error_t mqtt_client_handle_publish(mqtt_client_t *client,
+                                                const uint8_t *data,
+                                                size_t len)
+{
+    if (!client || !data || len < 2) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Extract flags from first byte */
+    uint8_t flags = data[0] & 0x0F;
+
+    /* Decode remaining length */
+    uint32_t remaining_len;
+    int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+    if (varint_bytes < 0) {
+        return MQTT_ERR_MALFORMED_PACKET;
+    }
+
+    size_t header_len = 1 + varint_bytes;
+    size_t total_len = header_len + remaining_len;
+
+    /* Check if we have the full packet */
+    if (len < total_len) {
+        return MQTT_ERR_BUFFER_UNDERFLOW;  /* Need more data */
+    }
+
+    /* Decode the PUBLISH packet */
+    mqtt_v311_publish_t pub;
+    mqtt_error_t err = mqtt_v311_decode_publish(data + header_len, remaining_len, flags, &pub);
+    if (err != MQTT_OK) {
+        return err;
+    }
+
+    /* Build mqtt_message_t for callback */
+    mqtt_message_t msg = {0};
+    msg.topic = pub.topic;
+    msg.topic_len = pub.topic_len;
+    msg.payload = pub.payload;
+    msg.payload_len = pub.payload_len;
+    msg.qos = pub.qos;
+    msg.retain = pub.retain;
+    msg.dup = pub.dup;
+    msg.packet_id = pub.packet_id;
+
+    /* Invoke on_message callback */
+    if (client->callbacks.on_message) {
+        client->callbacks.on_message(client, client->callbacks.user_data, &msg);
+    }
+
+    /* Send acknowledgment based on QoS */
+    if (pub.qos == MQTT_QOS_1) {
+        /* Send PUBACK */
+        mqtt_buffer_reset(&client->send_buf);
+        ssize_t encoded = mqtt_v311_encode_puback(&client->send_buf, pub.packet_id);
+        if (encoded > 0) {
+            mqtt_client_send_packet(client);
+        }
+    } else if (pub.qos == MQTT_QOS_2) {
+        /* Send PUBREC */
+        mqtt_buffer_reset(&client->send_buf);
+        ssize_t encoded = mqtt_v311_encode_pubrec(&client->send_buf, pub.packet_id);
+        if (encoded > 0) {
+            mqtt_client_send_packet(client);
+        }
+        /* Note: Full QoS 2 receive-side state tracking would store the packet_id
+         * and wait for PUBREL before completing. For now, we just send PUBREC. */
+    }
+
+    return MQTT_OK;
+}
+
 mqtt_error_t mqtt_client_process_retries(mqtt_client_t *client)
 {
     if (!client) {
@@ -934,8 +1012,7 @@ mqtt_error_t mqtt_loop(mqtt_client_t *client, int timeout_ms)
 
     switch (packet_type) {
         case MQTT_PACKET_PUBLISH:
-            /* TODO: Parse and dispatch PUBLISH message with full QoS handling */
-            /* For now, just consume the packet */
+            mqtt_client_handle_publish(client, data, len);
             mqtt_buffer_reset(&client->recv_buf);
             break;
 

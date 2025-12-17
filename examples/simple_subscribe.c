@@ -39,7 +39,7 @@ void on_disconnect(mqtt_client_t *client, void *user_data, int reason_code) {
 int main(int argc, char *argv[]) {
     const char *host = argc > 1 ? argv[1] : "localhost";
     uint16_t port = argc > 2 ? (uint16_t)atoi(argv[2]) : 1883;
-    const char *topic = argc > 3 ? argv[3] : "test/#";
+    const char *topic = argc > 3 ? argv[3] : "mqtt_client_test/#";
 
     mqtt_error_t err;
 
