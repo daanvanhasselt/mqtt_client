@@ -265,6 +265,9 @@ mqtt_client_t *mqtt_client_create(const mqtt_client_config_t *config)
         return NULL;
     }
 
+    /* Initialize QoS 2 receive tracker */
+    mqtt_qos2_recv_init(&client->qos2_recv, client->config.max_inflight_messages);
+
 #ifdef MQTT_THREAD_SAFE
     err = mqtt_mutex_init(&client->lock);
     if (err != MQTT_OK) {
@@ -297,6 +300,9 @@ void mqtt_client_destroy(mqtt_client_t *client)
 
     /* Cleanup inflight queue */
     mqtt_inflight_cleanup(&client->inflight);
+
+    /* Cleanup QoS 2 receive tracker */
+    mqtt_qos2_recv_cleanup(&client->qos2_recv);
 
     /* Cleanup buffers */
     mqtt_buffer_cleanup(&client->send_buf);
@@ -446,10 +452,12 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
         /* Clean session requested - clear any previous inflight state */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
+        mqtt_qos2_recv_clear(&client->qos2_recv);
     } else if (!connack.session_present) {
         /* Server didn't have a session for us - clear our state too */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
+        mqtt_qos2_recv_clear(&client->qos2_recv);
     }
     /* If clean_session=false AND session_present=true, we keep our inflight state
      * and can retry any pending QoS 1/2 messages on next loop iteration */
@@ -667,12 +675,185 @@ mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe_opts_t *
 
     uint8_t packet_type = (data[0] >> 4) & 0x0F;
     if (packet_type != MQTT_PACKET_SUBACK) {
+        mqtt_client_free_packet_id(client, packet_id);
         client->last_error = MQTT_ERR_PROTOCOL;
         return MQTT_ERR_PROTOCOL;
     }
 
-    /* Skip detailed SUBACK parsing for now, just verify we got SUBACK */
+    /* Decode remaining length to find variable header start */
+    uint32_t remaining_len;
+    int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+    if (varint_bytes < 0) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_MALFORMED_PACKET;
+        return MQTT_ERR_MALFORMED_PACKET;
+    }
+
+    size_t header_len = 1 + varint_bytes;
+    if (len < header_len + remaining_len) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_MALFORMED_PACKET;
+        return MQTT_ERR_MALFORMED_PACKET;
+    }
+
+    /* Parse SUBACK using the v311 decoder */
+    mqtt_v311_suback_t suback = {0};
+    err = mqtt_v311_decode_suback(data + header_len, remaining_len, &suback);
+    if (err != MQTT_OK) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = err;
+        return err;
+    }
+
+    /* Verify packet ID matches */
+    if (suback.packet_id != packet_id) {
+        mqtt_free(suback.return_codes);
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_PROTOCOL;
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Verify we got the right number of return codes */
+    if (suback.count != count) {
+        mqtt_free(suback.return_codes);
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_PROTOCOL;
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Check for subscription failures (0x80) and convert to QoS array */
+    mqtt_qos_t *granted_qos = NULL;
+    bool has_failure = false;
+
+    if (client->callbacks.on_subscribe) {
+        granted_qos = mqtt_malloc(sizeof(mqtt_qos_t) * count);
+        if (granted_qos) {
+            for (size_t i = 0; i < count; i++) {
+                if (suback.return_codes[i] == 0x80) {
+                    /* Subscription failed - set to an invalid QoS value */
+                    granted_qos[i] = (mqtt_qos_t)0x80;
+                    has_failure = true;
+                } else {
+                    granted_qos[i] = (mqtt_qos_t)suback.return_codes[i];
+                }
+            }
+            /* Invoke callback with granted QoS levels */
+            client->callbacks.on_subscribe(client, client->callbacks.user_data,
+                                           packet_id, granted_qos, count);
+            mqtt_free(granted_qos);
+        }
+    } else {
+        /* Check for failures even without callback */
+        for (size_t i = 0; i < count; i++) {
+            if (suback.return_codes[i] == 0x80) {
+                has_failure = true;
+                break;
+            }
+        }
+    }
+
+    /* Free the return codes array */
+    mqtt_free(suback.return_codes);
+
     /* Free the packet ID - SUBACK received successfully */
+    mqtt_client_free_packet_id(client, packet_id);
+    mqtt_buffer_reset(&client->recv_buf);
+
+    /* Return error if any subscription was rejected */
+    if (has_failure) {
+        client->last_error = MQTT_ERR_SUBSCRIPTION_NOT_FOUND;
+        return MQTT_ERR_SUBSCRIPTION_NOT_FOUND;
+    }
+
+    return MQTT_OK;
+}
+
+/* ========================================================================== */
+/* Synchronous Unsubscribe Function                                           */
+/* ========================================================================== */
+
+mqtt_error_t mqtt_unsubscribe(mqtt_client_t *client, const char **topic_filters, size_t count)
+{
+    if (!client || !topic_filters || count == 0) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    if (client->state != MQTT_STATE_CONNECTED) {
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    mqtt_error_t err;
+
+    /* Allocate packet ID */
+    uint16_t packet_id;
+    err = mqtt_client_alloc_packet_id(client, &packet_id);
+    if (err != MQTT_OK) {
+        client->last_error = err;
+        return err;
+    }
+
+    /* Build UNSUBSCRIBE packet */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_unsubscribe(&client->send_buf, packet_id,
+                                                    topic_filters, count);
+    if (encoded < 0) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = (mqtt_error_t)encoded;
+        return (mqtt_error_t)encoded;
+    }
+
+    /* Send UNSUBSCRIBE packet */
+    err = mqtt_client_send_packet(client);
+    if (err != MQTT_OK) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = err;
+        return err;
+    }
+
+    /* Wait for UNSUBACK */
+    err = mqtt_client_recv_packet(client, 5000);  /* 5 second timeout */
+    if (err != MQTT_OK) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = err;
+        return err;
+    }
+
+    /* Parse UNSUBACK */
+    const uint8_t *data = mqtt_buffer_data_const(&client->recv_buf);
+    size_t len = mqtt_buffer_len(&client->recv_buf);
+
+    if (len < 2) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_MALFORMED_PACKET;
+        return MQTT_ERR_MALFORMED_PACKET;
+    }
+
+    uint8_t packet_type = (data[0] >> 4) & 0x0F;
+    if (packet_type != MQTT_PACKET_UNSUBACK) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_PROTOCOL;
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Verify packet ID matches */
+    uint32_t remaining_len;
+    int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+    if (varint_bytes < 0 || remaining_len < 2) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_MALFORMED_PACKET;
+        return MQTT_ERR_MALFORMED_PACKET;
+    }
+
+    size_t header_len = 1 + varint_bytes;
+    uint16_t recv_packet_id = (data[header_len] << 8) | data[header_len + 1];
+
+    if (recv_packet_id != packet_id) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = MQTT_ERR_PROTOCOL;
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Free the packet ID - UNSUBACK received successfully */
     mqtt_client_free_packet_id(client, packet_id);
     mqtt_buffer_reset(&client->recv_buf);
 
@@ -753,12 +934,12 @@ mqtt_error_t mqtt_client_handle_pubrec(mqtt_client_t *client, uint16_t packet_id
 mqtt_error_t mqtt_client_handle_pubrel(mqtt_client_t *client, uint16_t packet_id)
 {
     /* This handles incoming PUBREL from broker (when we're the receiver of QoS 2) */
-    /* For now, we just send PUBCOMP - full incoming QoS 2 support requires
-     * tracking received message state, which is beyond basic implementation */
-
     if (!client) {
         return MQTT_ERR_INVALID_ARG;
     }
+
+    /* Remove from QoS 2 receive tracker - transaction complete */
+    mqtt_qos2_recv_remove(&client->qos2_recv, packet_id);
 
     /* Send PUBCOMP */
     mqtt_buffer_reset(&client->send_buf);
@@ -840,20 +1021,35 @@ static mqtt_error_t mqtt_client_handle_publish(mqtt_client_t *client,
         return err;
     }
 
-    /* Build mqtt_message_t for callback */
-    mqtt_message_t msg = {0};
-    msg.topic = pub.topic;
-    msg.topic_len = pub.topic_len;
-    msg.payload = pub.payload;
-    msg.payload_len = pub.payload_len;
-    msg.qos = pub.qos;
-    msg.retain = pub.retain;
-    msg.dup = pub.dup;
-    msg.packet_id = pub.packet_id;
+    /* Handle QoS 2 duplicate detection */
+    bool is_duplicate = false;
+    if (pub.qos == MQTT_QOS_2) {
+        if (mqtt_qos2_recv_is_tracked(&client->qos2_recv, pub.packet_id)) {
+            /* Duplicate QoS 2 message - don't deliver again */
+            is_duplicate = true;
+        } else {
+            /* New QoS 2 message - add to tracker */
+            mqtt_qos2_recv_add(&client->qos2_recv, pub.packet_id);
+        }
+    }
 
-    /* Invoke on_message callback */
-    if (client->callbacks.on_message) {
-        client->callbacks.on_message(client, client->callbacks.user_data, &msg);
+    /* Only deliver message if it's not a duplicate */
+    if (!is_duplicate) {
+        /* Build mqtt_message_t for callback */
+        mqtt_message_t msg = {0};
+        msg.topic = pub.topic;
+        msg.topic_len = pub.topic_len;
+        msg.payload = pub.payload;
+        msg.payload_len = pub.payload_len;
+        msg.qos = pub.qos;
+        msg.retain = pub.retain;
+        msg.dup = pub.dup;
+        msg.packet_id = pub.packet_id;
+
+        /* Invoke on_message callback */
+        if (client->callbacks.on_message) {
+            client->callbacks.on_message(client, client->callbacks.user_data, &msg);
+        }
     }
 
     /* Send acknowledgment based on QoS */
@@ -865,14 +1061,12 @@ static mqtt_error_t mqtt_client_handle_publish(mqtt_client_t *client,
             mqtt_client_send_packet(client);
         }
     } else if (pub.qos == MQTT_QOS_2) {
-        /* Send PUBREC */
+        /* Send PUBREC (even for duplicates - broker needs confirmation) */
         mqtt_buffer_reset(&client->send_buf);
         ssize_t encoded = mqtt_v311_encode_pubrec(&client->send_buf, pub.packet_id);
         if (encoded > 0) {
             mqtt_client_send_packet(client);
         }
-        /* Note: Full QoS 2 receive-side state tracking would store the packet_id
-         * and wait for PUBREL before completing. For now, we just send PUBREC. */
     }
 
     return MQTT_OK;
@@ -938,6 +1132,24 @@ mqtt_error_t mqtt_client_process_retries(mqtt_client_t *client)
 
         /* Mark as retried */
         mqtt_inflight_mark_retried(entry, now);
+    }
+
+    /* Check for messages that have exceeded max retries */
+    mqtt_inflight_entry_t *expired;
+    while ((expired = mqtt_inflight_get_expired(&client->inflight)) != NULL) {
+        uint16_t packet_id = expired->packet_id;
+
+        /* Free the packet ID */
+        mqtt_client_free_packet_id(client, packet_id);
+
+        /* Remove from queue (frees the entry) */
+        mqtt_inflight_remove(&client->inflight, expired);
+
+        /* Invoke the on_publish_failed callback */
+        if (client->callbacks.on_publish_failed) {
+            client->callbacks.on_publish_failed(client, client->callbacks.user_data,
+                                                 packet_id, MQTT_ERR_MAX_RETRIES);
+        }
     }
 
     return MQTT_OK;

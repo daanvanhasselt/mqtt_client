@@ -151,6 +151,9 @@ typedef enum mqtt_error {
     /** Client is disconnecting */
     MQTT_ERR_DISCONNECTING = -306,
 
+    /** Maximum retransmission attempts exceeded for QoS 1/2 message */
+    MQTT_ERR_MAX_RETRIES = -307,
+
     /***************************************************************************
      * Async Operation Errors (-400 to -499)
      **************************************************************************/

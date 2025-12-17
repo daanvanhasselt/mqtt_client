@@ -265,3 +265,20 @@ void mqtt_inflight_set_retry_config(mqtt_inflight_queue_t *queue,
     queue->retry_timeout_ms = timeout_ms;
     queue->max_retries = max_retries;
 }
+
+mqtt_inflight_entry_t *mqtt_inflight_get_expired(mqtt_inflight_queue_t *queue)
+{
+    if (!queue) {
+        return NULL;
+    }
+
+    mqtt_inflight_entry_t *entry = queue->head;
+    while (entry) {
+        if (entry->retry_count >= queue->max_retries) {
+            return entry;
+        }
+        entry = entry->next;
+    }
+
+    return NULL;
+}

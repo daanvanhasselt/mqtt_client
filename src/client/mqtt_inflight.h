@@ -187,6 +187,16 @@ void mqtt_inflight_set_retry_config(mqtt_inflight_queue_t *queue,
                                     uint32_t timeout_ms,
                                     uint8_t max_retries);
 
+/**
+ * @brief Get first entry that has exceeded max retries
+ *
+ * Scans the queue for entries whose retry_count >= max_retries.
+ *
+ * @param queue Pointer to queue
+ * @return Entry with exceeded retries, or NULL if none
+ */
+mqtt_inflight_entry_t *mqtt_inflight_get_expired(mqtt_inflight_queue_t *queue);
+
 #ifdef __cplusplus
 }
 #endif
