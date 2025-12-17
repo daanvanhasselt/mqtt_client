@@ -11,6 +11,7 @@
 
 #include "mqtt_client_internal.h"
 #include "../protocol/mqtt_v311/mqtt_v311.h"
+#include "../protocol/mqtt_v5/mqtt_v5.h"
 #include "../core/mqtt_packet.h"
 #include "../core/mqtt_varint.h"
 #include "../memory/mqtt_memory.h"
@@ -371,9 +372,39 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
 
     client->state = MQTT_STATE_CONNECTED_TCP;
 
-    /* Build CONNECT packet */
+    /* Build CONNECT packet based on protocol version */
     mqtt_buffer_reset(&client->send_buf);
-    ssize_t encoded = mqtt_v311_encode_connect(&client->send_buf, opts);
+    ssize_t encoded;
+    if (opts->protocol_version == MQTT_VERSION_5_0) {
+        /* MQTT 5.0 - build properties from connection options */
+        mqtt_property_t *props = NULL;
+        if (opts->session_expiry_interval > 0) {
+            mqtt_property_add_u32(&props, MQTT_PROP_SESSION_EXPIRY_INTERVAL, opts->session_expiry_interval);
+        }
+        if (opts->receive_maximum > 0 && opts->receive_maximum != 65535) {
+            mqtt_property_add_u16(&props, MQTT_PROP_RECEIVE_MAXIMUM, opts->receive_maximum);
+        }
+        if (opts->maximum_packet_size > 0) {
+            mqtt_property_add_u32(&props, MQTT_PROP_MAXIMUM_PACKET_SIZE, opts->maximum_packet_size);
+        }
+        if (opts->topic_alias_maximum > 0) {
+            mqtt_property_add_u16(&props, MQTT_PROP_TOPIC_ALIAS_MAXIMUM, opts->topic_alias_maximum);
+        }
+        /* Copy user properties if provided */
+        mqtt_property_t *user_prop = opts->user_properties;
+        while (user_prop) {
+            if (user_prop->id == MQTT_PROP_USER_PROPERTY) {
+                mqtt_property_add_user_property(&props, user_prop->value.string_pair.key,
+                                                user_prop->value.string_pair.value);
+            }
+            user_prop = user_prop->next;
+        }
+        encoded = mqtt_v5_encode_connect(&client->send_buf, opts, props);
+        mqtt_property_list_free(props);
+    } else {
+        /* MQTT 3.1.1 */
+        encoded = mqtt_v311_encode_connect(&client->send_buf, opts);
+    }
     if (encoded < 0) {
         client->last_error = (mqtt_error_t)encoded;
         client->state = MQTT_STATE_ERROR;
@@ -416,53 +447,98 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
     }
 
     /* Decode remaining length */
-    uint32_t remaining_len = data[1];  /* For CONNACK, always 2 */
-    if (remaining_len != 2 || len < 4) {
+    uint32_t remaining_len;
+    int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+    if (varint_bytes < 0 || len < (size_t)(1 + varint_bytes + remaining_len)) {
         client->last_error = MQTT_ERR_MALFORMED_PACKET;
         client->state = MQTT_STATE_ERROR;
         return MQTT_ERR_MALFORMED_PACKET;
     }
 
-    mqtt_v311_connack_t connack;
-    err = mqtt_v311_decode_connack(data + 2, 2, &connack);
-    if (err != MQTT_OK) {
-        client->last_error = err;
-        client->state = MQTT_STATE_ERROR;
-        return err;
-    }
+    bool session_present = false;
 
-    /* Check return code */
-    if (connack.return_code != 0) {
-        /* Map CONNACK return code to error */
-        switch (connack.return_code) {
-            case 1: err = MQTT_ERR_V311_UNACCEPTABLE_PROTOCOL; break;
-            case 2: err = MQTT_ERR_V311_IDENTIFIER_REJECTED; break;
-            case 3: err = MQTT_ERR_V311_SERVER_UNAVAILABLE; break;
-            case 4: err = MQTT_ERR_V311_BAD_CREDENTIALS; break;
-            case 5: err = MQTT_ERR_V311_NOT_AUTHORIZED; break;
-            default: err = MQTT_ERR_PROTOCOL; break;
+    if (opts->protocol_version == MQTT_VERSION_5_0) {
+        /* MQTT 5.0 CONNACK */
+        mqtt_v5_connack_t connack_v5;
+        err = mqtt_v5_decode_connack(data + 1 + varint_bytes, remaining_len, &connack_v5);
+        if (err != MQTT_OK) {
+            client->last_error = err;
+            client->state = MQTT_STATE_ERROR;
+            return err;
         }
-        client->last_error = err;
-        client->state = MQTT_STATE_ERROR;
-        return err;
+
+        session_present = connack_v5.session_present;
+
+        /* Check reason code */
+        if (connack_v5.reason_code != MQTT_RC_SUCCESS) {
+            /* Map MQTT 5.0 reason code to error */
+            switch (connack_v5.reason_code) {
+                case MQTT_RC_UNSUPPORTED_PROTOCOL_VERSION: err = MQTT_ERR_V311_UNACCEPTABLE_PROTOCOL; break;
+                case MQTT_RC_CLIENT_ID_NOT_VALID: err = MQTT_ERR_V311_IDENTIFIER_REJECTED; break;
+                case MQTT_RC_SERVER_UNAVAILABLE: err = MQTT_ERR_V311_SERVER_UNAVAILABLE; break;
+                case MQTT_RC_BAD_USERNAME_OR_PASSWORD: err = MQTT_ERR_V311_BAD_CREDENTIALS; break;
+                case MQTT_RC_NOT_AUTHORIZED: err = MQTT_ERR_V311_NOT_AUTHORIZED; break;
+                default: err = MQTT_ERR_PROTOCOL; break;
+            }
+            mqtt_property_list_free(connack_v5.properties);
+            client->last_error = err;
+            client->state = MQTT_STATE_ERROR;
+            return err;
+        }
+
+        /* TODO: Process CONNACK properties (server keepalive, assigned client ID, etc.) */
+        mqtt_property_list_free(connack_v5.properties);
+    } else {
+        /* MQTT 3.1.1 CONNACK */
+        if (remaining_len != 2) {
+            client->last_error = MQTT_ERR_MALFORMED_PACKET;
+            client->state = MQTT_STATE_ERROR;
+            return MQTT_ERR_MALFORMED_PACKET;
+        }
+
+        mqtt_v311_connack_t connack;
+        err = mqtt_v311_decode_connack(data + 1 + varint_bytes, remaining_len, &connack);
+        if (err != MQTT_OK) {
+            client->last_error = err;
+            client->state = MQTT_STATE_ERROR;
+            return err;
+        }
+
+        session_present = connack.session_present;
+
+        /* Check return code */
+        if (connack.return_code != 0) {
+            /* Map CONNACK return code to error */
+            switch (connack.return_code) {
+                case 1: err = MQTT_ERR_V311_UNACCEPTABLE_PROTOCOL; break;
+                case 2: err = MQTT_ERR_V311_IDENTIFIER_REJECTED; break;
+                case 3: err = MQTT_ERR_V311_SERVER_UNAVAILABLE; break;
+                case 4: err = MQTT_ERR_V311_BAD_CREDENTIALS; break;
+                case 5: err = MQTT_ERR_V311_NOT_AUTHORIZED; break;
+                default: err = MQTT_ERR_PROTOCOL; break;
+            }
+            client->last_error = err;
+            client->state = MQTT_STATE_ERROR;
+            return err;
+        }
     }
 
     /* Successfully connected */
     client->state = MQTT_STATE_CONNECTED;
     client->protocol_version = opts->protocol_version;
-    client->clean_session = opts->clean_session;
+    client->clean_session = opts->protocol_version == MQTT_VERSION_5_0 ? opts->clean_start : opts->clean_session;
     client->keepalive_sec = opts->keepalive_sec ? opts->keepalive_sec : DEFAULT_KEEPALIVE;
     client->last_send_time = mqtt_time_monotonic_ms();
     client->last_recv_time = mqtt_time_monotonic_ms();
     client->ping_outstanding = false;
 
     /* Handle session state based on clean_session and session_present */
-    if (opts->clean_session) {
+    if (client->clean_session) {
         /* Clean session requested - clear any previous inflight state */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
         mqtt_qos2_recv_clear(&client->qos2_recv);
-    } else if (!connack.session_present) {
+    } else if (!session_present) {
         /* Server didn't have a session for us - clear our state too */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
@@ -478,7 +554,7 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
     /* Invoke on_connect callback */
     if (client->callbacks.on_connect) {
         client->callbacks.on_connect(client, client->callbacks.user_data,
-                                    connack.session_present);
+                                    session_present);
     }
 
     return MQTT_OK;
@@ -496,9 +572,16 @@ mqtt_error_t mqtt_disconnect(mqtt_client_t *client)
 
     mqtt_error_t err;
 
-    /* Build DISCONNECT packet */
+    /* Build DISCONNECT packet based on protocol version */
     mqtt_buffer_reset(&client->send_buf);
-    ssize_t encoded = mqtt_v311_encode_disconnect(&client->send_buf);
+    ssize_t encoded;
+    if (client->protocol_version == MQTT_VERSION_5_0) {
+        /* MQTT 5.0 DISCONNECT with reason code */
+        encoded = mqtt_v5_encode_disconnect(&client->send_buf, MQTT_RC_NORMAL_DISCONNECTION, NULL);
+    } else {
+        /* MQTT 3.1.1 DISCONNECT */
+        encoded = mqtt_v311_encode_disconnect(&client->send_buf);
+    }
     if (encoded < 0) {
         client->last_error = (mqtt_error_t)encoded;
         return (mqtt_error_t)encoded;
@@ -563,9 +646,46 @@ mqtt_error_t mqtt_publish(mqtt_client_t *client, const mqtt_publish_opts_t *opts
         }
     }
 
-    /* Build PUBLISH packet */
+    /* Build PUBLISH packet based on protocol version */
     mqtt_buffer_reset(&client->send_buf);
-    ssize_t encoded = mqtt_v311_encode_publish(&client->send_buf, opts, packet_id);
+    ssize_t encoded;
+    if (client->protocol_version == MQTT_VERSION_5_0) {
+        /* MQTT 5.0 - build properties from publish options */
+        mqtt_property_t *props = NULL;
+        if (opts->payload_format == MQTT_PAYLOAD_FORMAT_UTF8) {
+            mqtt_property_add_byte(&props, MQTT_PROP_PAYLOAD_FORMAT_INDICATOR, 1);
+        }
+        if (opts->message_expiry > 0) {
+            mqtt_property_add_u32(&props, MQTT_PROP_MESSAGE_EXPIRY_INTERVAL, opts->message_expiry);
+        }
+        if (opts->response_topic) {
+            mqtt_property_add_string(&props, MQTT_PROP_RESPONSE_TOPIC, opts->response_topic);
+        }
+        if (opts->correlation_data && opts->correlation_data_len > 0) {
+            mqtt_property_add_binary(&props, MQTT_PROP_CORRELATION_DATA,
+                                     opts->correlation_data, (uint16_t)opts->correlation_data_len);
+        }
+        if (opts->content_type) {
+            mqtt_property_add_string(&props, MQTT_PROP_CONTENT_TYPE, opts->content_type);
+        }
+        if (opts->topic_alias > 0) {
+            mqtt_property_add_u16(&props, MQTT_PROP_TOPIC_ALIAS, opts->topic_alias);
+        }
+        /* Copy user properties */
+        mqtt_property_t *user_prop = opts->user_properties;
+        while (user_prop) {
+            if (user_prop->id == MQTT_PROP_USER_PROPERTY) {
+                mqtt_property_add_user_property(&props, user_prop->value.string_pair.key,
+                                                user_prop->value.string_pair.value);
+            }
+            user_prop = user_prop->next;
+        }
+        encoded = mqtt_v5_encode_publish(&client->send_buf, opts, packet_id, props);
+        mqtt_property_list_free(props);
+    } else {
+        /* MQTT 3.1.1 */
+        encoded = mqtt_v311_encode_publish(&client->send_buf, opts, packet_id);
+    }
     if (encoded < 0) {
         if (packet_id != 0) {
             mqtt_client_free_packet_id(client, packet_id);
@@ -637,24 +757,62 @@ mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe_opts_t *
         return err;
     }
 
-    /* Convert mqtt_subscribe_opts_t to mqtt_v311_subscription_t */
-    mqtt_v311_subscription_t *subs = mqtt_malloc(sizeof(mqtt_v311_subscription_t) * count);
-    if (!subs) {
-        mqtt_client_free_packet_id(client, packet_id);
-        return MQTT_ERR_NOMEM;
-    }
-
-    for (size_t i = 0; i < count; i++) {
-        subs[i].topic_filter = opts[i].topic_filter;
-        subs[i].qos = opts[i].max_qos;
-    }
-
-    /* Build SUBSCRIBE packet */
+    /* Build SUBSCRIBE packet based on protocol version */
     mqtt_buffer_reset(&client->send_buf);
-    ssize_t encoded = mqtt_v311_encode_subscribe(&client->send_buf, packet_id, subs, count);
-    mqtt_free(subs);
+    ssize_t encoded;
+
+    if (client->protocol_version == MQTT_VERSION_5_0) {
+        /* MQTT 5.0 - convert to v5 subscription format with options */
+        mqtt_v5_subscription_t *subs_v5 = mqtt_malloc(sizeof(mqtt_v5_subscription_t) * count);
+        if (!subs_v5) {
+            mqtt_client_free_packet_id(client, packet_id);
+            return MQTT_ERR_NOMEM;
+        }
+
+        mqtt_property_t *props = NULL;
+        for (size_t i = 0; i < count; i++) {
+            subs_v5[i].topic_filter = opts[i].topic_filter;
+            subs_v5[i].max_qos = opts[i].max_qos;
+            subs_v5[i].no_local = opts[i].no_local;
+            subs_v5[i].retain_as_published = opts[i].retain_as_published;
+            subs_v5[i].retain_handling = opts[i].retain_handling;
+        }
+        /* Add subscription identifier if provided */
+        if (opts[0].subscription_id > 0) {
+            mqtt_property_add_varint(&props, MQTT_PROP_SUBSCRIPTION_IDENTIFIER, opts[0].subscription_id);
+        }
+        /* Copy user properties from first subscription */
+        mqtt_property_t *user_prop = opts[0].user_properties;
+        while (user_prop) {
+            if (user_prop->id == MQTT_PROP_USER_PROPERTY) {
+                mqtt_property_add_user_property(&props, user_prop->value.string_pair.key,
+                                                user_prop->value.string_pair.value);
+            }
+            user_prop = user_prop->next;
+        }
+
+        encoded = mqtt_v5_encode_subscribe(&client->send_buf, packet_id, subs_v5, count, props);
+        mqtt_free(subs_v5);
+        mqtt_property_list_free(props);
+    } else {
+        /* MQTT 3.1.1 - convert to v311 subscription format */
+        mqtt_v311_subscription_t *subs = mqtt_malloc(sizeof(mqtt_v311_subscription_t) * count);
+        if (!subs) {
+            mqtt_client_free_packet_id(client, packet_id);
+            return MQTT_ERR_NOMEM;
+        }
+
+        for (size_t i = 0; i < count; i++) {
+            subs[i].topic_filter = opts[i].topic_filter;
+            subs[i].qos = opts[i].max_qos;
+        }
+
+        encoded = mqtt_v311_encode_subscribe(&client->send_buf, packet_id, subs, count);
+        mqtt_free(subs);
+    }
 
     if (encoded < 0) {
+        mqtt_client_free_packet_id(client, packet_id);
         client->last_error = (mqtt_error_t)encoded;
         return (mqtt_error_t)encoded;
     }
