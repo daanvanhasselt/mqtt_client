@@ -38,31 +38,32 @@
 
 ---
 
-## Phase 3: Async API & Event Loop
+## Phase 3: Async API & Event Loop ✅
 **Goal**: Non-blocking operations and event loop integration
 
-- [ ] I/O abstraction layer
-  - [ ] select() implementation
-  - [ ] poll() implementation
-- [ ] Async client operations
-  - [ ] mqtt_connect_async()
-  - [ ] mqtt_publish_async()
-  - [ ] mqtt_subscribe_async()
-  - [ ] mqtt_unsubscribe_async()
-- [ ] Callback system
-  - [ ] on_connect callback
-  - [ ] on_disconnect callback
-  - [ ] on_message callback
-  - [ ] on_publish_complete callback (QoS 1/2)
-  - [ ] on_subscribe callback
-- [ ] Event loop integration
-  - [ ] mqtt_get_socket_fd()
-  - [ ] mqtt_want_write()
-  - [ ] mqtt_process_read()
-  - [ ] mqtt_process_write()
-- [ ] Thread safety
-  - [ ] Mutex protection for client state
-  - [ ] Thread-safe callback invocation
+- [x] I/O abstraction layer
+  - [x] poll() implementation (used in socket layer)
+  - [x] Non-blocking socket support
+- [x] Async client operations
+  - [x] mqtt_connect_async()
+  - [x] mqtt_publish_async()
+  - [x] mqtt_subscribe_async()
+  - [x] mqtt_unsubscribe_async()
+- [x] Callback system
+  - [x] on_connect callback
+  - [x] on_disconnect callback
+  - [x] on_message callback
+  - [x] on_publish_complete callback (QoS 1/2)
+  - [x] on_publish_failed callback (max retries exceeded)
+  - [x] on_subscribe callback
+- [x] Event loop integration
+  - [x] mqtt_get_socket_fd()
+  - [x] mqtt_want_write()
+  - [x] mqtt_process_read()
+  - [x] mqtt_process_write()
+- [x] Thread safety
+  - [x] Mutex protection for client state
+  - [x] Thread-safe callback invocation
 
 ---
 
@@ -196,7 +197,7 @@
 |-------|--------|-------------|
 | 1 | ✅ Complete | Foundation - MQTT 3.1.1 over TCP |
 | 2 | ✅ Complete | QoS & Session Management |
-| 3 | ⬜ Not started | Async API & Event Loop |
+| 3 | ✅ Complete | Async API & Event Loop |
 | 4 | ⬜ Not started | TLS Support |
 | 5 | ⬜ Not started | MQTT 5.0 Protocol |
 | 6 | ⬜ Not started | WebSocket Transport |

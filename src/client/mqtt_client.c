@@ -19,6 +19,15 @@
 #include <sys/select.h>
 #include <sys/time.h>
 
+/* Thread safety macros */
+#ifdef MQTT_THREAD_SAFE
+    #define CLIENT_LOCK(client)   mqtt_mutex_lock(&(client)->lock)
+    #define CLIENT_UNLOCK(client) mqtt_mutex_unlock(&(client)->lock)
+#else
+    #define CLIENT_LOCK(client)   ((void)0)
+    #define CLIENT_UNLOCK(client) ((void)0)
+#endif
+
 /* Library version */
 #define MQTT_VERSION_MAJOR 1
 #define MQTT_VERSION_MINOR 0
@@ -1156,6 +1165,132 @@ mqtt_error_t mqtt_client_process_retries(mqtt_client_t *client)
 }
 
 /* ========================================================================== */
+/* Packet Processing (used by both sync and async paths)                      */
+/* ========================================================================== */
+
+/**
+ * @brief Process all complete packets in the receive buffer
+ *
+ * This function is shared between mqtt_loop() and mqtt_process_read().
+ */
+static mqtt_error_t mqtt_client_process_packets(mqtt_client_t *client)
+{
+    while (1) {
+        const uint8_t *data = mqtt_buffer_data_const(&client->recv_buf);
+        size_t len = mqtt_buffer_len(&client->recv_buf);
+
+        if (len < 2) {
+            break;  /* Not enough data for a packet */
+        }
+
+        /* Decode remaining length to find packet size */
+        uint32_t remaining_len;
+        int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+        if (varint_bytes < 0) {
+            break;  /* Incomplete varint, need more data */
+        }
+
+        size_t packet_len = 1 + varint_bytes + remaining_len;
+        if (len < packet_len) {
+            break;  /* Incomplete packet, need more data */
+        }
+
+        uint8_t packet_type = (data[0] >> 4) & 0x0F;
+
+        switch (packet_type) {
+            case MQTT_PACKET_CONNACK:
+                /* Handle CONNACK for async connect */
+                if (client->state == MQTT_STATE_CONNECTING_MQTT) {
+                    size_t header_len = 1 + varint_bytes;
+                    mqtt_v311_connack_t connack;
+                    mqtt_error_t err = mqtt_v311_decode_connack(data + header_len, remaining_len, &connack);
+                    if (err == MQTT_OK && connack.return_code == 0) {
+                        client->state = MQTT_STATE_CONNECTED;
+                        /* Handle session present flag for QoS state */
+                        if (!connack.session_present || client->clean_session) {
+                            mqtt_inflight_clear(&client->inflight);
+                            mqtt_packet_id_reset(&client->packet_ids);
+                            mqtt_qos2_recv_clear(&client->qos2_recv);
+                        }
+                        if (client->callbacks.on_connect) {
+                            client->callbacks.on_connect(client, client->callbacks.user_data, connack.session_present);
+                        }
+                    } else {
+                        client->state = MQTT_STATE_ERROR;
+                        client->last_error = MQTT_ERR_CONNECT_FAILED;
+                        if (client->callbacks.on_disconnect) {
+                            client->callbacks.on_disconnect(client, client->callbacks.user_data, connack.return_code);
+                        }
+                    }
+                }
+                break;
+
+            case MQTT_PACKET_PUBLISH:
+                mqtt_client_handle_publish(client, data, packet_len);
+                break;
+
+            case MQTT_PACKET_PUBACK:
+                /* QoS 1 acknowledgment */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_puback(client, packet_id);
+                }
+                break;
+
+            case MQTT_PACKET_PUBREC:
+                /* QoS 2 step 1: PUBLISH received */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubrec(client, packet_id);
+                }
+                break;
+
+            case MQTT_PACKET_PUBREL:
+                /* QoS 2 step 2: PUBLISH release */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubrel(client, packet_id);
+                }
+                break;
+
+            case MQTT_PACKET_PUBCOMP:
+                /* QoS 2 step 3: PUBLISH complete */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubcomp(client, packet_id);
+                }
+                break;
+
+            case MQTT_PACKET_SUBACK:
+                /* Subscribe acknowledgment - invoke callback if set */
+                /* Note: For async, we'd need to track pending subscribes */
+                break;
+
+            case MQTT_PACKET_UNSUBACK:
+                /* Unsubscribe acknowledgment */
+                break;
+
+            case MQTT_PACKET_PINGRESP:
+                client->ping_outstanding = false;
+                break;
+
+            default:
+                /* Unknown or unexpected packet - skip it */
+                break;
+        }
+
+        /* Consume the processed packet from buffer */
+        mqtt_buffer_consume(&client->recv_buf, packet_len);
+    }
+
+    return MQTT_OK;
+}
+
+/* ========================================================================== */
 /* Event Loop Functions                                                       */
 /* ========================================================================== */
 
@@ -1212,84 +1347,8 @@ mqtt_error_t mqtt_loop(mqtt_client_t *client, int timeout_ms)
         return err;
     }
 
-    /* Process all complete packets in buffer */
-    while (1) {
-        const uint8_t *data = mqtt_buffer_data_const(&client->recv_buf);
-        size_t len = mqtt_buffer_len(&client->recv_buf);
-
-        if (len < 2) {
-            break;  /* Not enough data for a packet */
-        }
-
-        /* Decode remaining length to find packet size */
-        uint32_t remaining_len;
-        int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
-        if (varint_bytes < 0) {
-            break;  /* Incomplete varint, need more data */
-        }
-
-        size_t packet_len = 1 + varint_bytes + remaining_len;
-        if (len < packet_len) {
-            break;  /* Incomplete packet, need more data */
-        }
-
-        uint8_t packet_type = (data[0] >> 4) & 0x0F;
-
-        switch (packet_type) {
-            case MQTT_PACKET_PUBLISH:
-                mqtt_client_handle_publish(client, data, packet_len);
-                break;
-
-            case MQTT_PACKET_PUBACK:
-                /* QoS 1 acknowledgment - packet is: type(1) + len(1) + packet_id(2) */
-                if (packet_len >= 4) {
-                    size_t header_len = 1 + varint_bytes;
-                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
-                    mqtt_client_handle_puback(client, packet_id);
-                }
-                break;
-
-            case MQTT_PACKET_PUBREC:
-                /* QoS 2 step 1: PUBLISH received */
-                if (packet_len >= 4) {
-                    size_t header_len = 1 + varint_bytes;
-                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
-                    mqtt_client_handle_pubrec(client, packet_id);
-                }
-                break;
-
-            case MQTT_PACKET_PUBREL:
-                /* QoS 2 step 2: PUBLISH release (from broker to us as receiver) */
-                if (packet_len >= 4) {
-                    size_t header_len = 1 + varint_bytes;
-                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
-                    mqtt_client_handle_pubrel(client, packet_id);
-                }
-                break;
-
-            case MQTT_PACKET_PUBCOMP:
-                /* QoS 2 step 3: PUBLISH complete */
-                if (packet_len >= 4) {
-                    size_t header_len = 1 + varint_bytes;
-                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
-                    mqtt_client_handle_pubcomp(client, packet_id);
-                }
-                break;
-
-            case MQTT_PACKET_PINGRESP:
-                client->ping_outstanding = false;
-                break;
-
-            default:
-                /* Unknown or unexpected packet - skip it */
-                break;
-        }
-
-        /* Consume the processed packet from buffer */
-        mqtt_buffer_consume(&client->recv_buf, packet_len);
-    }
-
-    return MQTT_OK;
+    /* Process all complete packets in buffer using shared function */
+    return mqtt_client_process_packets(client);
 }
 
 mqtt_error_t mqtt_loop_tick(mqtt_client_t *client)
@@ -1308,4 +1367,378 @@ void mqtt_set_callbacks(mqtt_client_t *client, const mqtt_callbacks_t *callbacks
     }
 
     client->callbacks = *callbacks;
+}
+
+/* ========================================================================== */
+/* Event Loop Integration                                                      */
+/* ========================================================================== */
+
+int mqtt_get_socket_fd(mqtt_client_t *client)
+{
+    if (!client || !client->transport) {
+        return -1;
+    }
+
+    return mqtt_transport_get_fd(client->transport);
+}
+
+bool mqtt_want_write(mqtt_client_t *client)
+{
+    if (!client) {
+        return false;
+    }
+
+    return mqtt_buffer_len(&client->send_buf) > 0;
+}
+
+mqtt_error_t mqtt_process_write(mqtt_client_t *client)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    CLIENT_LOCK(client);
+
+    if (!client->transport || client->state == MQTT_STATE_DISCONNECTED) {
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    /* Nothing to write */
+    size_t to_send = mqtt_buffer_len(&client->send_buf);
+    if (to_send == 0) {
+        CLIENT_UNLOCK(client);
+        return MQTT_OK;
+    }
+
+    /* Try to send data */
+    const uint8_t *data = mqtt_buffer_data_const(&client->send_buf);
+    ssize_t sent = mqtt_transport_send(client->transport, data, to_send);
+
+    if (sent < 0) {
+        /* Check for would-block (not an error in non-blocking mode) */
+        if (sent == MQTT_ERR_WOULD_BLOCK) {
+            CLIENT_UNLOCK(client);
+            return MQTT_ERR_WOULD_BLOCK;
+        }
+        client->last_error = (mqtt_error_t)sent;
+        CLIENT_UNLOCK(client);
+        return (mqtt_error_t)sent;
+    }
+
+    /* Consume sent data from buffer */
+    if (sent > 0) {
+        mqtt_buffer_consume(&client->send_buf, (size_t)sent);
+        mqtt_client_update_last_send(client);
+    }
+
+    CLIENT_UNLOCK(client);
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_process_read(mqtt_client_t *client)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    CLIENT_LOCK(client);
+
+    if (!client->transport || client->state == MQTT_STATE_DISCONNECTED) {
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    /* Read available data into recv_buf */
+    size_t space = mqtt_buffer_write_available(&client->recv_buf);
+    if (space == 0) {
+        /* Try to grow buffer */
+        mqtt_error_t reserve_err = mqtt_buffer_reserve(&client->recv_buf,
+            mqtt_buffer_len(&client->recv_buf) + 1024);
+        if (reserve_err != MQTT_OK) {
+            CLIENT_UNLOCK(client);
+            return MQTT_ERR_NOMEM;
+        }
+        space = mqtt_buffer_write_available(&client->recv_buf);
+    }
+
+    uint8_t *write_ptr = mqtt_buffer_write_ptr(&client->recv_buf);
+    ssize_t received = mqtt_transport_recv(client->transport, write_ptr, space);
+
+    if (received < 0) {
+        /* Check for would-block (not an error in non-blocking mode) */
+        if (received == MQTT_ERR_WOULD_BLOCK) {
+            CLIENT_UNLOCK(client);
+            return MQTT_ERR_WOULD_BLOCK;
+        }
+        client->last_error = (mqtt_error_t)received;
+        CLIENT_UNLOCK(client);
+        return (mqtt_error_t)received;
+    }
+
+    if (received == 0) {
+        /* Connection closed by peer */
+        client->state = MQTT_STATE_DISCONNECTED;
+        if (client->callbacks.on_disconnect) {
+            CLIENT_UNLOCK(client);
+            client->callbacks.on_disconnect(client, client->callbacks.user_data, 0);
+            return MQTT_ERR_CONNECTION_LOST;
+        }
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_CONNECTION_LOST;
+    }
+
+    /* Commit received data */
+    mqtt_buffer_advance_write(&client->recv_buf, (size_t)received);
+    mqtt_client_update_last_recv(client);
+
+    /* Process all complete packets in buffer */
+    mqtt_error_t err = mqtt_client_process_packets(client);
+    if (err != MQTT_OK && err != MQTT_ERR_WOULD_BLOCK) {
+        CLIENT_UNLOCK(client);
+        return err;
+    }
+
+    /* Also process retries while we're here */
+    mqtt_client_process_retries(client);
+
+    CLIENT_UNLOCK(client);
+    return MQTT_OK;
+}
+
+/* ========================================================================== */
+/* Asynchronous API                                                            */
+/* ========================================================================== */
+
+mqtt_error_t mqtt_connect_async(mqtt_client_t *client, const mqtt_connect_opts_t *opts)
+{
+    if (!client || !opts) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    if (client->state != MQTT_STATE_DISCONNECTED) {
+        return MQTT_ERR_ALREADY_CONNECTED;
+    }
+
+    mqtt_error_t err;
+
+    /* Create transport if needed */
+    if (!client->transport) {
+        client->transport = mqtt_transport_create(opts->transport_type,
+                                                   opts->tls_config,
+                                                   opts->ws_config);
+        if (!client->transport) {
+            client->last_error = MQTT_ERR_NOMEM;
+            return MQTT_ERR_NOMEM;
+        }
+    }
+
+    /* Set non-blocking mode for async operation */
+    err = mqtt_transport_set_blocking(client->transport, false);
+    if (err != MQTT_OK) {
+        client->last_error = err;
+        return err;
+    }
+
+    /* Store connection info */
+    client->keepalive_sec = opts->keepalive_sec > 0 ? opts->keepalive_sec : 60;
+    client->clean_session = opts->clean_session;
+    client->protocol_version = opts->protocol_version;
+
+    /* Initiate TCP connection (non-blocking) */
+    uint16_t port = opts->port > 0 ? opts->port : 1883;
+    err = mqtt_transport_connect(client->transport, opts->host, port, 0);
+
+    if (err == MQTT_ERR_WOULD_BLOCK || err == MQTT_ERR_IN_PROGRESS) {
+        /* Connection in progress */
+        client->state = MQTT_STATE_CONNECTING;
+        return MQTT_OK;
+    } else if (err == MQTT_OK) {
+        /* Connected immediately - proceed to MQTT handshake */
+        client->state = MQTT_STATE_CONNECTED_TCP;
+
+        /* Build and queue CONNECT packet */
+        mqtt_buffer_reset(&client->send_buf);
+        ssize_t encoded = mqtt_v311_encode_connect(&client->send_buf, opts);
+        if (encoded < 0) {
+            client->last_error = (mqtt_error_t)encoded;
+            return (mqtt_error_t)encoded;
+        }
+
+        client->state = MQTT_STATE_CONNECTING_MQTT;
+        return MQTT_OK;
+    } else {
+        client->last_error = err;
+        return err;
+    }
+}
+
+mqtt_error_t mqtt_publish_async(mqtt_client_t *client, const mqtt_publish_opts_t *opts, uint16_t *packet_id_out)
+{
+    if (!client || !opts || !opts->topic) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    CLIENT_LOCK(client);
+
+    if (client->state != MQTT_STATE_CONNECTED) {
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    uint16_t packet_id = 0;
+    mqtt_error_t err;
+
+    /* For QoS > 0, allocate packet ID and add to inflight queue */
+    if (opts->qos > MQTT_QOS_0) {
+        err = mqtt_client_alloc_packet_id(client, &packet_id);
+        if (err != MQTT_OK) {
+            client->last_error = err;
+            CLIENT_UNLOCK(client);
+            return err;
+        }
+
+        /* Add to inflight queue */
+        uint64_t now = mqtt_time_monotonic_ms();
+        err = mqtt_inflight_add(&client->inflight, packet_id, opts->qos,
+                                opts->topic, opts->payload, opts->payload_len,
+                                opts->retain, now);
+        if (err != MQTT_OK) {
+            mqtt_client_free_packet_id(client, packet_id);
+            client->last_error = err;
+            CLIENT_UNLOCK(client);
+            return err;
+        }
+    }
+
+    /* Build PUBLISH packet */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_publish(&client->send_buf, opts, packet_id);
+    if (encoded < 0) {
+        if (opts->qos > MQTT_QOS_0) {
+            mqtt_inflight_entry_t *entry = mqtt_inflight_find(&client->inflight, packet_id);
+            if (entry) {
+                mqtt_inflight_remove(&client->inflight, entry);
+            }
+            mqtt_client_free_packet_id(client, packet_id);
+        }
+        client->last_error = (mqtt_error_t)encoded;
+        CLIENT_UNLOCK(client);
+        return (mqtt_error_t)encoded;
+    }
+
+    /* Return packet ID for tracking */
+    if (packet_id_out && opts->qos > MQTT_QOS_0) {
+        *packet_id_out = packet_id;
+    }
+
+    CLIENT_UNLOCK(client);
+    /* Data is now in send_buf, will be sent via mqtt_process_write() */
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_subscribe_async(mqtt_client_t *client, const mqtt_subscribe_opts_t *opts,
+                                   size_t count, uint16_t *packet_id_out)
+{
+    if (!client || !opts || count == 0) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    CLIENT_LOCK(client);
+
+    if (client->state != MQTT_STATE_CONNECTED) {
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    mqtt_error_t err;
+
+    /* Allocate packet ID */
+    uint16_t packet_id;
+    err = mqtt_client_alloc_packet_id(client, &packet_id);
+    if (err != MQTT_OK) {
+        client->last_error = err;
+        CLIENT_UNLOCK(client);
+        return err;
+    }
+
+    /* Convert mqtt_subscribe_opts_t to mqtt_v311_subscription_t */
+    mqtt_v311_subscription_t *subs = mqtt_malloc(sizeof(mqtt_v311_subscription_t) * count);
+    if (!subs) {
+        mqtt_client_free_packet_id(client, packet_id);
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOMEM;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        subs[i].topic_filter = opts[i].topic_filter;
+        subs[i].qos = opts[i].max_qos;
+    }
+
+    /* Build SUBSCRIBE packet */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_subscribe(&client->send_buf, packet_id, subs, count);
+    mqtt_free(subs);
+
+    if (encoded < 0) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = (mqtt_error_t)encoded;
+        CLIENT_UNLOCK(client);
+        return (mqtt_error_t)encoded;
+    }
+
+    /* Return packet ID for tracking */
+    if (packet_id_out) {
+        *packet_id_out = packet_id;
+    }
+
+    CLIENT_UNLOCK(client);
+    /* Data is now in send_buf, will be sent via mqtt_process_write() */
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_unsubscribe_async(mqtt_client_t *client, const char **topic_filters,
+                                     size_t count, uint16_t *packet_id_out)
+{
+    if (!client || !topic_filters || count == 0) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    CLIENT_LOCK(client);
+
+    if (client->state != MQTT_STATE_CONNECTED) {
+        CLIENT_UNLOCK(client);
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    mqtt_error_t err;
+
+    /* Allocate packet ID */
+    uint16_t packet_id;
+    err = mqtt_client_alloc_packet_id(client, &packet_id);
+    if (err != MQTT_OK) {
+        client->last_error = err;
+        CLIENT_UNLOCK(client);
+        return err;
+    }
+
+    /* Build UNSUBSCRIBE packet */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_unsubscribe(&client->send_buf, packet_id,
+                                                    topic_filters, count);
+    if (encoded < 0) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = (mqtt_error_t)encoded;
+        CLIENT_UNLOCK(client);
+        return (mqtt_error_t)encoded;
+    }
+
+    /* Return packet ID for tracking */
+    if (packet_id_out) {
+        *packet_id_out = packet_id;
+    }
+
+    CLIENT_UNLOCK(client);
+    /* Data is now in send_buf, will be sent via mqtt_process_write() */
+    return MQTT_OK;
 }
