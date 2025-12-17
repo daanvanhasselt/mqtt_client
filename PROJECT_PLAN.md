@@ -88,38 +88,38 @@
 
 ---
 
-## Phase 5: MQTT 5.0 Protocol
+## Phase 5: MQTT 5.0 Protocol ✅
 **Goal**: Complete MQTT 5.0 support alongside 3.1.1
 
-- [ ] Properties system
-  - [ ] Property encode/decode for all types
-  - [ ] Property list management
-  - [ ] User properties support
-- [ ] Extended CONNECT/CONNACK
-  - [ ] Session expiry interval
-  - [ ] Receive maximum
-  - [ ] Maximum packet size
-  - [ ] Topic alias maximum
-  - [ ] Request response information
-  - [ ] Request problem information
-  - [ ] Authentication method/data
-- [ ] Extended PUBLISH
-  - [ ] Payload format indicator
-  - [ ] Message expiry interval
-  - [ ] Topic alias
-  - [ ] Response topic
-  - [ ] Correlation data
-  - [ ] Content type
-- [ ] Extended SUBSCRIBE
-  - [ ] Subscription identifier
-  - [ ] No local option
-  - [ ] Retain as published
-  - [ ] Retain handling
-- [ ] AUTH packet (enhanced authentication)
-- [ ] Reason codes (all packets)
-- [ ] DISCONNECT with reason code and properties
-- [ ] Server redirection handling
-- [ ] Protocol version negotiation/fallback
+- [x] Properties system
+  - [x] Property encode/decode for all types
+  - [x] Property list management
+  - [x] User properties support
+- [x] Extended CONNECT/CONNACK
+  - [x] Session expiry interval
+  - [x] Receive maximum
+  - [x] Maximum packet size
+  - [x] Topic alias maximum
+  - [x] Request response information
+  - [x] Request problem information
+  - [x] Authentication method/data
+- [x] Extended PUBLISH
+  - [x] Payload format indicator
+  - [x] Message expiry interval
+  - [x] Topic alias
+  - [x] Response topic
+  - [x] Correlation data
+  - [x] Content type
+- [x] Extended SUBSCRIBE
+  - [x] Subscription identifier
+  - [x] No local option
+  - [x] Retain as published
+  - [x] Retain handling
+- [x] AUTH packet (enhanced authentication)
+- [x] Reason codes (all packets)
+- [x] DISCONNECT with reason code and properties
+- [ ] Server redirection handling (deferred)
+- [x] Protocol version negotiation
 
 ---
 
@@ -199,7 +199,7 @@
 | 2 | ✅ Complete | QoS & Session Management |
 | 3 | ✅ Complete | Async API & Event Loop |
 | 4 | ✅ Complete | TLS Support (OpenSSL backend) |
-| 5 | ⬜ Not started | MQTT 5.0 Protocol |
+| 5 | ✅ Complete | MQTT 5.0 Protocol |
 | 6 | ⬜ Not started | WebSocket Transport |
 | 7 | ⬜ Not started | Platform Ports |
 | 8 | ⬜ Not started | Polish & Production Readiness |
