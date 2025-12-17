@@ -79,6 +79,8 @@ const char *mqtt_error_str(mqtt_error_t err)
             return "Subscription not found";
         case MQTT_ERR_DISCONNECTING:
             return "Client is disconnecting";
+        case MQTT_ERR_MAX_RETRIES:
+            return "Maximum retransmission attempts exceeded";
 
         /* Async errors */
         case MQTT_ERR_WOULD_BLOCK:

@@ -9,6 +9,7 @@
 #include "../platform/mqtt_platform.h"
 #include "mqtt_packet_id.h"
 #include "mqtt_inflight.h"
+#include "mqtt_qos2_recv.h"
 
 /* Client state */
 typedef enum mqtt_client_state {
@@ -41,7 +42,8 @@ struct mqtt_client {
 
     /* QoS management (Phase 2) */
     mqtt_packet_id_allocator_t packet_ids;   /* Packet ID allocator */
-    mqtt_inflight_queue_t inflight;          /* Inflight message queue */
+    mqtt_inflight_queue_t inflight;          /* Inflight message queue for outgoing QoS 1/2 */
+    mqtt_qos2_recv_tracker_t qos2_recv;      /* Received QoS 2 message tracker */
 
     /* Connection info */
     uint16_t keepalive_sec;

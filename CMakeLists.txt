@@ -103,6 +103,7 @@ set(MQTT_CLIENT_SOURCES
     src/client/mqtt_client.c
     src/client/mqtt_packet_id.c
     src/client/mqtt_inflight.c
+    src/client/mqtt_qos2_recv.c
 )
 
 ################################################################################

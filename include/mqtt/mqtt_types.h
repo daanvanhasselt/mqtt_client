@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "mqtt_error.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -264,6 +266,16 @@ typedef void (*mqtt_on_message_cb)(mqtt_client_t *client, void *user_data, const
 typedef void (*mqtt_on_publish_complete_cb)(mqtt_client_t *client, void *user_data, uint16_t packet_id);
 
 /**
+ * @brief Publish failed callback (for QoS 1 and 2 when max retries exceeded)
+ *
+ * @param client MQTT client handle
+ * @param user_data User-provided context data
+ * @param packet_id Packet identifier of failed publish
+ * @param reason Error code indicating why the publish failed
+ */
+typedef void (*mqtt_on_publish_failed_cb)(mqtt_client_t *client, void *user_data, uint16_t packet_id, mqtt_error_t reason);
+
+/**
  * @brief Subscribe complete callback
  *
  * @param client MQTT client handle
@@ -283,6 +295,7 @@ typedef struct {
     mqtt_on_disconnect_cb on_disconnect;          /**< Disconnection callback */
     mqtt_on_message_cb on_message;                /**< Message received callback */
     mqtt_on_publish_complete_cb on_publish_complete; /**< Publish complete callback */
+    mqtt_on_publish_failed_cb on_publish_failed;  /**< Publish failed callback */
     mqtt_on_subscribe_cb on_subscribe;            /**< Subscribe complete callback */
     void *user_data;                              /**< User-provided context data */
 } mqtt_callbacks_t;
