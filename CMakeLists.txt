@@ -93,7 +93,8 @@ set(MQTT_V311_SOURCES
 )
 
 set(MQTT_V5_SOURCES
-    # TODO: Add MQTT v5.0 sources when implemented
+    src/protocol/mqtt_v5/mqtt_v5_properties.c
+    src/protocol/mqtt_v5/mqtt_v5_codec.c
 )
 
 ################################################################################

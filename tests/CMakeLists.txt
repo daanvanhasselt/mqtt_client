@@ -42,5 +42,10 @@ add_mqtt_test(test_inflight unit/test_inflight.c)
 add_mqtt_test(test_buffer unit/test_buffer.c)
 add_mqtt_test(test_varint unit/test_varint.c)
 
+# MQTT 5.0 Tests
+if(MQTT_ENABLE_V5)
+    add_mqtt_test(test_mqtt_v5_properties unit/test_mqtt_v5_properties.c)
+endif()
+
 # Integration tests (require network, run separately)
 # add_mqtt_test(test_broker_connect integration/test_broker_connect.c)
