@@ -8,8 +8,13 @@
  */
 
 #include "mqtt_transport.h"
+#include "mqtt/mqtt_config.h"
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef MQTT_ENABLE_TLS
+#include "tls/mqtt_tls.h"
+#endif
 
 /*******************************************************************************
  * Transport Factory Functions
@@ -19,7 +24,9 @@ mqtt_transport_t *mqtt_transport_create(mqtt_transport_type_t type,
                                         const mqtt_tls_config_t *tls_config,
                                         const mqtt_ws_config_t *ws_config)
 {
-    (void)tls_config;  /* Unused for now (TLS not implemented) */
+#ifndef MQTT_ENABLE_TLS
+    (void)tls_config;  /* Unused when TLS is disabled */
+#endif
     (void)ws_config;  /* Unused for now (WebSocket not implemented) */
 
     switch (type) {
@@ -31,8 +38,7 @@ mqtt_transport_t *mqtt_transport_create(mqtt_transport_type_t type,
             if (tls_config == NULL) {
                 return NULL;
             }
-            /* TODO: Implement TLS transport creation */
-            return NULL;
+            return mqtt_transport_tls_create(tls_config);
 #else
             return NULL;
 #endif
@@ -78,11 +84,14 @@ mqtt_error_t mqtt_transport_connect(mqtt_transport_t *transport,
     }
 
     mqtt_error_t err = transport->ops->connect(transport, host, port, timeout_ms);
-    if (err != MQTT_OK) {
+    if (err == MQTT_OK) {
+        transport->status = MQTT_TRANSPORT_CONNECTED;
+    } else if (err == MQTT_ERR_WOULD_BLOCK) {
+        /* Non-blocking handshake in progress - status set by transport */
+        transport->last_error = err;
+    } else {
         transport->last_error = err;
         transport->status = MQTT_TRANSPORT_ERROR;
-    } else {
-        transport->status = MQTT_TRANSPORT_CONNECTED;
     }
 
     return err;

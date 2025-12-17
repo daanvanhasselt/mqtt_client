@@ -67,24 +67,24 @@
 
 ---
 
-## Phase 4: TLS Support
+## Phase 4: TLS Support ✅
 **Goal**: Secure connections with pluggable TLS backends
 
-- [ ] TLS interface abstraction (src/transport/tls/)
-- [ ] OpenSSL backend
-  - [ ] SSL context management
-  - [ ] Certificate loading (CA, client cert, key)
-  - [ ] SNI support
-  - [ ] Hostname verification
-- [ ] mbedTLS backend
+- [x] TLS interface abstraction (src/transport/tls/)
+- [x] OpenSSL backend
+  - [x] SSL context management
+  - [x] Certificate loading (CA, client cert, key)
+  - [x] SNI support
+  - [x] Hostname verification
+- [ ] mbedTLS backend (stub only)
   - [ ] Configuration and setup
   - [ ] Certificate parsing
   - [ ] Entropy/RNG initialization
-- [ ] TLS transport integration
-  - [ ] Non-blocking handshake
-  - [ ] Graceful shutdown
-- [ ] mTLS (mutual TLS) support
-- [ ] ALPN protocol negotiation
+- [x] TLS transport integration
+  - [x] Non-blocking handshake
+  - [x] Graceful shutdown
+- [x] mTLS (mutual TLS) support
+- [x] ALPN protocol negotiation
 
 ---
 
@@ -198,7 +198,7 @@
 | 1 | ✅ Complete | Foundation - MQTT 3.1.1 over TCP |
 | 2 | ✅ Complete | QoS & Session Management |
 | 3 | ✅ Complete | Async API & Event Loop |
-| 4 | ⬜ Not started | TLS Support |
+| 4 | ✅ Complete | TLS Support (OpenSSL backend) |
 | 5 | ⬜ Not started | MQTT 5.0 Protocol |
 | 6 | ⬜ Not started | WebSocket Transport |
 | 7 | ⬜ Not started | Platform Ports |

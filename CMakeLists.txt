@@ -116,9 +116,9 @@ set(MQTT_TRANSPORT_SOURCES
 
 if(MQTT_ENABLE_TLS)
     if(MQTT_TLS_BACKEND STREQUAL "openssl")
-        # TODO: list(APPEND MQTT_TRANSPORT_SOURCES src/transport/tls/tls_openssl.c)
+        list(APPEND MQTT_TRANSPORT_SOURCES src/transport/tls/mqtt_tls_openssl.c)
     elseif(MQTT_TLS_BACKEND STREQUAL "mbedtls")
-        # TODO: list(APPEND MQTT_TRANSPORT_SOURCES src/transport/tls/tls_mbedtls.c)
+        list(APPEND MQTT_TRANSPORT_SOURCES src/transport/tls/mqtt_tls_mbedtls.c)
     endif()
 endif()
 
