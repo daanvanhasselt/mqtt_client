@@ -7,6 +7,8 @@
 #include "../transport/mqtt_transport.h"
 #include "../memory/mqtt_buffer.h"
 #include "../platform/mqtt_platform.h"
+#include "mqtt_packet_id.h"
+#include "mqtt_inflight.h"
 
 /* Client state */
 typedef enum mqtt_client_state {
@@ -19,15 +21,6 @@ typedef enum mqtt_client_state {
     MQTT_STATE_ERROR
 } mqtt_client_state_t;
 
-/* Inflight message for QoS tracking (for later phases) */
-typedef struct mqtt_inflight_msg {
-    uint16_t packet_id;
-    uint8_t  qos;
-    uint8_t  state;
-    uint64_t timestamp;
-    struct mqtt_inflight_msg *next;
-} mqtt_inflight_msg_t;
-
 /* Internal client structure */
 struct mqtt_client {
     /* Configuration */
@@ -37,7 +30,6 @@ struct mqtt_client {
     mqtt_client_state_t state;
     mqtt_protocol_version_t protocol_version;
     bool clean_session;
-    uint16_t next_packet_id;
 
     /* Transport */
     mqtt_transport_t *transport;
@@ -46,6 +38,10 @@ struct mqtt_client {
     mqtt_buffer_t send_buf;
     mqtt_buffer_t recv_buf;
     size_t recv_offset;  /* Parse position in recv_buf */
+
+    /* QoS management (Phase 2) */
+    mqtt_packet_id_allocator_t packet_ids;   /* Packet ID allocator */
+    mqtt_inflight_queue_t inflight;          /* Inflight message queue */
 
     /* Connection info */
     uint16_t keepalive_sec;
@@ -64,11 +60,21 @@ struct mqtt_client {
 #endif
 };
 
-/* Internal helpers */
-uint16_t mqtt_client_next_packet_id(mqtt_client_t *client);
+/* Internal helpers - Packet management */
+mqtt_error_t mqtt_client_alloc_packet_id(mqtt_client_t *client, uint16_t *packet_id);
+void mqtt_client_free_packet_id(mqtt_client_t *client, uint16_t packet_id);
+
+/* Internal helpers - I/O */
 mqtt_error_t mqtt_client_send_packet(mqtt_client_t *client);
 mqtt_error_t mqtt_client_recv_packet(mqtt_client_t *client, int timeout_ms);
 void mqtt_client_update_last_send(mqtt_client_t *client);
 void mqtt_client_update_last_recv(mqtt_client_t *client);
+
+/* Internal helpers - QoS acknowledgment handling */
+mqtt_error_t mqtt_client_handle_puback(mqtt_client_t *client, uint16_t packet_id);
+mqtt_error_t mqtt_client_handle_pubrec(mqtt_client_t *client, uint16_t packet_id);
+mqtt_error_t mqtt_client_handle_pubrel(mqtt_client_t *client, uint16_t packet_id);
+mqtt_error_t mqtt_client_handle_pubcomp(mqtt_client_t *client, uint16_t packet_id);
+mqtt_error_t mqtt_client_process_retries(mqtt_client_t *client);
 
 #endif /* MQTT_CLIENT_INTERNAL_H */
