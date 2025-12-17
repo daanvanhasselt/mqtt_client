@@ -73,19 +73,22 @@ const char *mqtt_lib_version(void)
 /* Internal Helper Functions                                                  */
 /* ========================================================================== */
 
-uint16_t mqtt_client_next_packet_id(mqtt_client_t *client)
+mqtt_error_t mqtt_client_alloc_packet_id(mqtt_client_t *client, uint16_t *packet_id)
 {
-    if (!client) {
-        return 0;
+    if (!client || !packet_id) {
+        return MQTT_ERR_INVALID_ARG;
     }
 
-    /* Packet IDs are 1-65535 (0 is reserved) */
-    client->next_packet_id++;
-    if (client->next_packet_id == 0) {
-        client->next_packet_id = 1;
+    return mqtt_packet_id_alloc(&client->packet_ids, packet_id);
+}
+
+void mqtt_client_free_packet_id(mqtt_client_t *client, uint16_t packet_id)
+{
+    if (!client || packet_id == 0) {
+        return;
     }
 
-    return client->next_packet_id;
+    mqtt_packet_id_free(&client->packet_ids, packet_id);
 }
 
 void mqtt_client_update_last_send(mqtt_client_t *client)
@@ -242,7 +245,24 @@ mqtt_client_t *mqtt_client_create(const mqtt_client_config_t *config)
     }
 
     client->state = MQTT_STATE_DISCONNECTED;
-    client->next_packet_id = 1;
+
+    /* Initialize packet ID allocator */
+    err = mqtt_packet_id_init(&client->packet_ids);
+    if (err != MQTT_OK) {
+        mqtt_buffer_cleanup(&client->send_buf);
+        mqtt_buffer_cleanup(&client->recv_buf);
+        mqtt_free(client);
+        return NULL;
+    }
+
+    /* Initialize inflight queue */
+    err = mqtt_inflight_init(&client->inflight, client->config.max_inflight_messages);
+    if (err != MQTT_OK) {
+        mqtt_buffer_cleanup(&client->send_buf);
+        mqtt_buffer_cleanup(&client->recv_buf);
+        mqtt_free(client);
+        return NULL;
+    }
 
 #ifdef MQTT_THREAD_SAFE
     err = mqtt_mutex_init(&client->lock);
@@ -273,6 +293,9 @@ void mqtt_client_destroy(mqtt_client_t *client)
         mqtt_transport_destroy(client->transport);
         client->transport = NULL;
     }
+
+    /* Cleanup inflight queue */
+    mqtt_inflight_cleanup(&client->inflight);
 
     /* Cleanup buffers */
     mqtt_buffer_cleanup(&client->send_buf);
@@ -417,6 +440,19 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
     client->last_recv_time = mqtt_time_monotonic_ms();
     client->ping_outstanding = false;
 
+    /* Handle session state based on clean_session and session_present */
+    if (opts->clean_session) {
+        /* Clean session requested - clear any previous inflight state */
+        mqtt_inflight_clear(&client->inflight);
+        mqtt_packet_id_reset(&client->packet_ids);
+    } else if (!connack.session_present) {
+        /* Server didn't have a session for us - clear our state too */
+        mqtt_inflight_clear(&client->inflight);
+        mqtt_packet_id_reset(&client->packet_ids);
+    }
+    /* If clean_session=false AND session_present=true, we keep our inflight state
+     * and can retry any pending QoS 1/2 messages on next loop iteration */
+
     /* Clear receive buffer */
     mqtt_buffer_reset(&client->recv_buf);
     client->recv_offset = 0;
@@ -462,6 +498,12 @@ mqtt_error_t mqtt_disconnect(mqtt_client_t *client)
         mqtt_transport_disconnect(client->transport);
     }
 
+    /* If clean_session was true, clear inflight state */
+    if (client->clean_session) {
+        mqtt_inflight_clear(&client->inflight);
+        mqtt_packet_id_reset(&client->packet_ids);
+    }
+
     client->state = MQTT_STATE_DISCONNECTED;
 
     /* Invoke on_disconnect callback */
@@ -478,7 +520,7 @@ mqtt_error_t mqtt_disconnect(mqtt_client_t *client)
 
 mqtt_error_t mqtt_publish(mqtt_client_t *client, const mqtt_publish_opts_t *opts)
 {
-    if (!client || !opts) {
+    if (!client || !opts || !opts->topic) {
         return MQTT_ERR_INVALID_ARG;
     }
 
@@ -491,13 +533,25 @@ mqtt_error_t mqtt_publish(mqtt_client_t *client, const mqtt_publish_opts_t *opts
 
     /* For QoS 0, packet_id is 0. For QoS 1/2, allocate packet ID */
     if (opts->qos > MQTT_QOS_0) {
-        packet_id = mqtt_client_next_packet_id(client);
+        /* Check inflight queue capacity */
+        if (mqtt_inflight_is_full(&client->inflight)) {
+            return MQTT_ERR_INFLIGHT_FULL;
+        }
+
+        err = mqtt_client_alloc_packet_id(client, &packet_id);
+        if (err != MQTT_OK) {
+            client->last_error = err;
+            return err;
+        }
     }
 
     /* Build PUBLISH packet */
     mqtt_buffer_reset(&client->send_buf);
     ssize_t encoded = mqtt_v311_encode_publish(&client->send_buf, opts, packet_id);
     if (encoded < 0) {
+        if (packet_id != 0) {
+            mqtt_client_free_packet_id(client, packet_id);
+        }
         client->last_error = (mqtt_error_t)encoded;
         return (mqtt_error_t)encoded;
     }
@@ -505,6 +559,9 @@ mqtt_error_t mqtt_publish(mqtt_client_t *client, const mqtt_publish_opts_t *opts
     /* Send PUBLISH packet */
     err = mqtt_client_send_packet(client);
     if (err != MQTT_OK) {
+        if (packet_id != 0) {
+            mqtt_client_free_packet_id(client, packet_id);
+        }
         client->last_error = err;
         return err;
     }
@@ -514,8 +571,26 @@ mqtt_error_t mqtt_publish(mqtt_client_t *client, const mqtt_publish_opts_t *opts
         return MQTT_OK;
     }
 
-    /* For QoS 1/2, wait for acknowledgment (simplified for now) */
-    /* TODO: Implement proper QoS 1/2 handling with inflight tracking */
+    /* For QoS 1/2, add to inflight queue */
+    uint64_t now = mqtt_time_monotonic_ms();
+    err = mqtt_inflight_add(&client->inflight,
+                            packet_id,
+                            opts->qos,
+                            opts->topic,
+                            opts->payload,
+                            opts->payload_len,
+                            opts->retain,
+                            now);
+    if (err != MQTT_OK) {
+        mqtt_client_free_packet_id(client, packet_id);
+        client->last_error = err;
+        return err;
+    }
+
+    /* For synchronous API, we could wait for ACK here, but for async compatibility
+     * we return immediately. The ACK will be handled in mqtt_loop().
+     * Users wanting synchronous behavior should call mqtt_loop() until
+     * their packet_id is acknowledged via the on_publish_complete callback. */
 
     return MQTT_OK;
 }
@@ -537,11 +612,17 @@ mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe_opts_t *
     mqtt_error_t err;
 
     /* Allocate packet ID */
-    uint16_t packet_id = mqtt_client_next_packet_id(client);
+    uint16_t packet_id;
+    err = mqtt_client_alloc_packet_id(client, &packet_id);
+    if (err != MQTT_OK) {
+        client->last_error = err;
+        return err;
+    }
 
     /* Convert mqtt_subscribe_opts_t to mqtt_v311_subscription_t */
     mqtt_v311_subscription_t *subs = mqtt_malloc(sizeof(mqtt_v311_subscription_t) * count);
     if (!subs) {
+        mqtt_client_free_packet_id(client, packet_id);
         return MQTT_ERR_NOMEM;
     }
 
@@ -589,8 +670,197 @@ mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe_opts_t *
         return MQTT_ERR_PROTOCOL;
     }
 
-    /* Skip fixed header parsing for now, just verify we got SUBACK */
+    /* Skip detailed SUBACK parsing for now, just verify we got SUBACK */
+    /* Free the packet ID - SUBACK received successfully */
+    mqtt_client_free_packet_id(client, packet_id);
     mqtt_buffer_reset(&client->recv_buf);
+
+    return MQTT_OK;
+}
+
+/* ========================================================================== */
+/* QoS Acknowledgment Handlers                                                */
+/* ========================================================================== */
+
+mqtt_error_t mqtt_client_handle_puback(mqtt_client_t *client, uint16_t packet_id)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Find the inflight message */
+    mqtt_inflight_entry_t *entry = mqtt_inflight_find(&client->inflight, packet_id);
+    if (!entry) {
+        /* Unknown packet ID - protocol violation or late ACK */
+        return MQTT_ERR_INVALID_PACKET_ID;
+    }
+
+    /* Verify this is a QoS 1 message */
+    if (entry->qos != MQTT_QOS_1) {
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Free the packet ID */
+    mqtt_client_free_packet_id(client, packet_id);
+
+    /* Remove from inflight queue */
+    mqtt_inflight_remove(&client->inflight, entry);
+
+    /* Invoke callback */
+    if (client->callbacks.on_publish_complete) {
+        client->callbacks.on_publish_complete(client, client->callbacks.user_data, packet_id);
+    }
+
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_client_handle_pubrec(mqtt_client_t *client, uint16_t packet_id)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Find the inflight message */
+    mqtt_inflight_entry_t *entry = mqtt_inflight_find(&client->inflight, packet_id);
+    if (!entry) {
+        return MQTT_ERR_INVALID_PACKET_ID;
+    }
+
+    /* Verify this is a QoS 2 message in PENDING state */
+    if (entry->qos != MQTT_QOS_2 || entry->state != MQTT_INFLIGHT_PENDING) {
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Send PUBREL */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_pubrel(&client->send_buf, packet_id);
+    if (encoded < 0) {
+        return (mqtt_error_t)encoded;
+    }
+
+    mqtt_error_t err = mqtt_client_send_packet(client);
+    if (err != MQTT_OK) {
+        return err;
+    }
+
+    /* Update state to PUBREL sent */
+    mqtt_inflight_update_state(entry, MQTT_INFLIGHT_PUBREL, mqtt_time_monotonic_ms());
+
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_client_handle_pubrel(mqtt_client_t *client, uint16_t packet_id)
+{
+    /* This handles incoming PUBREL from broker (when we're the receiver of QoS 2) */
+    /* For now, we just send PUBCOMP - full incoming QoS 2 support requires
+     * tracking received message state, which is beyond basic implementation */
+
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Send PUBCOMP */
+    mqtt_buffer_reset(&client->send_buf);
+    ssize_t encoded = mqtt_v311_encode_pubcomp(&client->send_buf, packet_id);
+    if (encoded < 0) {
+        return (mqtt_error_t)encoded;
+    }
+
+    return mqtt_client_send_packet(client);
+}
+
+mqtt_error_t mqtt_client_handle_pubcomp(mqtt_client_t *client, uint16_t packet_id)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Find the inflight message */
+    mqtt_inflight_entry_t *entry = mqtt_inflight_find(&client->inflight, packet_id);
+    if (!entry) {
+        return MQTT_ERR_INVALID_PACKET_ID;
+    }
+
+    /* Verify this is a QoS 2 message in PUBREL state */
+    if (entry->qos != MQTT_QOS_2 || entry->state != MQTT_INFLIGHT_PUBREL) {
+        return MQTT_ERR_PROTOCOL;
+    }
+
+    /* Free the packet ID */
+    mqtt_client_free_packet_id(client, packet_id);
+
+    /* Remove from inflight queue */
+    mqtt_inflight_remove(&client->inflight, entry);
+
+    /* Invoke callback - QoS 2 publish complete! */
+    if (client->callbacks.on_publish_complete) {
+        client->callbacks.on_publish_complete(client, client->callbacks.user_data, packet_id);
+    }
+
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_client_process_retries(mqtt_client_t *client)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    uint64_t now = mqtt_time_monotonic_ms();
+
+    /* Check for messages that need retry */
+    mqtt_inflight_entry_t *entry;
+    while ((entry = mqtt_inflight_get_retry(&client->inflight, now)) != NULL) {
+        mqtt_error_t err;
+
+        switch (entry->state) {
+            case MQTT_INFLIGHT_PENDING:
+                /* Retry PUBLISH with DUP flag */
+                {
+                    mqtt_publish_opts_t opts = {
+                        .topic = entry->topic,
+                        .payload = entry->payload,
+                        .payload_len = entry->payload_len,
+                        .qos = entry->qos,
+                        .retain = entry->retain,
+                        .dup = true  /* Set DUP flag for retransmission */
+                    };
+
+                    mqtt_buffer_reset(&client->send_buf);
+                    ssize_t encoded = mqtt_v311_encode_publish(&client->send_buf, &opts, entry->packet_id);
+                    if (encoded < 0) {
+                        return (mqtt_error_t)encoded;
+                    }
+
+                    err = mqtt_client_send_packet(client);
+                    if (err != MQTT_OK) {
+                        return err;
+                    }
+                }
+                break;
+
+            case MQTT_INFLIGHT_PUBREL:
+                /* Retry PUBREL */
+                mqtt_buffer_reset(&client->send_buf);
+                ssize_t encoded = mqtt_v311_encode_pubrel(&client->send_buf, entry->packet_id);
+                if (encoded < 0) {
+                    return (mqtt_error_t)encoded;
+                }
+
+                err = mqtt_client_send_packet(client);
+                if (err != MQTT_OK) {
+                    return err;
+                }
+                break;
+
+            default:
+                /* PUBREC state shouldn't happen - we transition immediately to PUBREL */
+                break;
+        }
+
+        /* Mark as retried */
+        mqtt_inflight_mark_retried(entry, now);
+    }
 
     return MQTT_OK;
 }
@@ -610,9 +880,15 @@ mqtt_error_t mqtt_loop(mqtt_client_t *client, int timeout_ms)
     }
 
     mqtt_error_t err;
+    uint64_t now = mqtt_time_monotonic_ms();
+
+    /* Process message retries for QoS 1/2 */
+    err = mqtt_client_process_retries(client);
+    if (err != MQTT_OK) {
+        return err;
+    }
 
     /* Check if we need to send PINGREQ */
-    uint64_t now = mqtt_time_monotonic_ms();
     uint64_t keepalive_ms = client->keepalive_sec * 1000;
 
     if (keepalive_ms > 0 && (now - client->last_send_time) >= keepalive_ms) {
@@ -658,8 +934,44 @@ mqtt_error_t mqtt_loop(mqtt_client_t *client, int timeout_ms)
 
     switch (packet_type) {
         case MQTT_PACKET_PUBLISH:
-            /* TODO: Parse and dispatch PUBLISH message */
+            /* TODO: Parse and dispatch PUBLISH message with full QoS handling */
             /* For now, just consume the packet */
+            mqtt_buffer_reset(&client->recv_buf);
+            break;
+
+        case MQTT_PACKET_PUBACK:
+            /* QoS 1 acknowledgment */
+            if (len >= 4) {
+                uint16_t packet_id = (data[2] << 8) | data[3];
+                mqtt_client_handle_puback(client, packet_id);
+            }
+            mqtt_buffer_reset(&client->recv_buf);
+            break;
+
+        case MQTT_PACKET_PUBREC:
+            /* QoS 2 step 1: PUBLISH received */
+            if (len >= 4) {
+                uint16_t packet_id = (data[2] << 8) | data[3];
+                mqtt_client_handle_pubrec(client, packet_id);
+            }
+            mqtt_buffer_reset(&client->recv_buf);
+            break;
+
+        case MQTT_PACKET_PUBREL:
+            /* QoS 2 step 2: PUBLISH release (from broker to us as receiver) */
+            if (len >= 4) {
+                uint16_t packet_id = (data[2] << 8) | data[3];
+                mqtt_client_handle_pubrel(client, packet_id);
+            }
+            mqtt_buffer_reset(&client->recv_buf);
+            break;
+
+        case MQTT_PACKET_PUBCOMP:
+            /* QoS 2 step 3: PUBLISH complete */
+            if (len >= 4) {
+                uint16_t packet_id = (data[2] << 8) | data[3];
+                mqtt_client_handle_pubcomp(client, packet_id);
+            }
             mqtt_buffer_reset(&client->recv_buf);
             break;
 

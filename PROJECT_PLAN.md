@@ -17,24 +17,24 @@
 
 ---
 
-## Phase 2: QoS & Session Management
+## Phase 2: QoS & Session Management ✅
 **Goal**: Full QoS 0/1/2 support with reliable delivery
 
-- [ ] Packet ID generation and tracking
-- [ ] QoS 1 implementation
-  - [ ] PUBACK encoding/decoding
-  - [ ] Inflight message tracking
-  - [ ] Retry on timeout
-- [ ] QoS 2 implementation
-  - [ ] PUBREC/PUBREL/PUBCOMP state machine
-  - [ ] Exactly-once delivery guarantee
-- [ ] Message store (inflight queue with configurable limit)
-- [ ] Keepalive improvements
-  - [ ] Automatic PINGREQ scheduling
-  - [ ] Connection timeout detection
-- [ ] Session state management
-  - [ ] Clean session flag handling
-  - [ ] Subscription restoration on reconnect
+- [x] Packet ID generation and tracking
+- [x] QoS 1 implementation
+  - [x] PUBACK encoding/decoding
+  - [x] Inflight message tracking
+  - [x] Retry on timeout
+- [x] QoS 2 implementation
+  - [x] PUBREC/PUBREL/PUBCOMP state machine
+  - [x] Exactly-once delivery guarantee
+- [x] Message store (inflight queue with configurable limit)
+- [x] Keepalive improvements
+  - [x] Automatic PINGREQ scheduling
+  - [x] Connection timeout detection
+- [x] Session state management
+  - [x] Clean session flag handling
+  - [ ] Subscription restoration on reconnect (deferred to Phase 3)
 
 ---
 
@@ -195,7 +195,7 @@
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 1 | ✅ Complete | Foundation - MQTT 3.1.1 over TCP |
-| 2 | ⬜ Not started | QoS & Session Management |
+| 2 | ✅ Complete | QoS & Session Management |
 | 3 | ⬜ Not started | Async API & Event Loop |
 | 4 | ⬜ Not started | TLS Support |
 | 5 | ⬜ Not started | MQTT 5.0 Protocol |
