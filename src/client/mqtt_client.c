@@ -995,72 +995,86 @@ mqtt_error_t mqtt_loop(mqtt_client_t *client, int timeout_ms)
     /* Try to receive data */
     err = mqtt_client_recv_packet(client, timeout_ms);
     if (err == MQTT_ERR_TIMEOUT) {
-        return MQTT_OK;  /* Timeout is not an error in loop */
+        /* No new data, but process any packets already in buffer */
     } else if (err != MQTT_OK) {
         return err;
     }
 
-    /* Process received packet */
-    const uint8_t *data = mqtt_buffer_data_const(&client->recv_buf);
-    size_t len = mqtt_buffer_len(&client->recv_buf);
+    /* Process all complete packets in buffer */
+    while (1) {
+        const uint8_t *data = mqtt_buffer_data_const(&client->recv_buf);
+        size_t len = mqtt_buffer_len(&client->recv_buf);
 
-    if (len < 2) {
-        return MQTT_OK;  /* Not enough data yet */
-    }
+        if (len < 2) {
+            break;  /* Not enough data for a packet */
+        }
 
-    uint8_t packet_type = (data[0] >> 4) & 0x0F;
+        /* Decode remaining length to find packet size */
+        uint32_t remaining_len;
+        int varint_bytes = mqtt_varint_decode(data + 1, len - 1, &remaining_len);
+        if (varint_bytes < 0) {
+            break;  /* Incomplete varint, need more data */
+        }
 
-    switch (packet_type) {
-        case MQTT_PACKET_PUBLISH:
-            mqtt_client_handle_publish(client, data, len);
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+        size_t packet_len = 1 + varint_bytes + remaining_len;
+        if (len < packet_len) {
+            break;  /* Incomplete packet, need more data */
+        }
 
-        case MQTT_PACKET_PUBACK:
-            /* QoS 1 acknowledgment */
-            if (len >= 4) {
-                uint16_t packet_id = (data[2] << 8) | data[3];
-                mqtt_client_handle_puback(client, packet_id);
-            }
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+        uint8_t packet_type = (data[0] >> 4) & 0x0F;
 
-        case MQTT_PACKET_PUBREC:
-            /* QoS 2 step 1: PUBLISH received */
-            if (len >= 4) {
-                uint16_t packet_id = (data[2] << 8) | data[3];
-                mqtt_client_handle_pubrec(client, packet_id);
-            }
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+        switch (packet_type) {
+            case MQTT_PACKET_PUBLISH:
+                mqtt_client_handle_publish(client, data, packet_len);
+                break;
 
-        case MQTT_PACKET_PUBREL:
-            /* QoS 2 step 2: PUBLISH release (from broker to us as receiver) */
-            if (len >= 4) {
-                uint16_t packet_id = (data[2] << 8) | data[3];
-                mqtt_client_handle_pubrel(client, packet_id);
-            }
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+            case MQTT_PACKET_PUBACK:
+                /* QoS 1 acknowledgment - packet is: type(1) + len(1) + packet_id(2) */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_puback(client, packet_id);
+                }
+                break;
 
-        case MQTT_PACKET_PUBCOMP:
-            /* QoS 2 step 3: PUBLISH complete */
-            if (len >= 4) {
-                uint16_t packet_id = (data[2] << 8) | data[3];
-                mqtt_client_handle_pubcomp(client, packet_id);
-            }
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+            case MQTT_PACKET_PUBREC:
+                /* QoS 2 step 1: PUBLISH received */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubrec(client, packet_id);
+                }
+                break;
 
-        case MQTT_PACKET_PINGRESP:
-            client->ping_outstanding = false;
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+            case MQTT_PACKET_PUBREL:
+                /* QoS 2 step 2: PUBLISH release (from broker to us as receiver) */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubrel(client, packet_id);
+                }
+                break;
 
-        default:
-            /* Unknown or unexpected packet */
-            mqtt_buffer_reset(&client->recv_buf);
-            break;
+            case MQTT_PACKET_PUBCOMP:
+                /* QoS 2 step 3: PUBLISH complete */
+                if (packet_len >= 4) {
+                    size_t header_len = 1 + varint_bytes;
+                    uint16_t packet_id = (data[header_len] << 8) | data[header_len + 1];
+                    mqtt_client_handle_pubcomp(client, packet_id);
+                }
+                break;
+
+            case MQTT_PACKET_PINGRESP:
+                client->ping_outstanding = false;
+                break;
+
+            default:
+                /* Unknown or unexpected packet - skip it */
+                break;
+        }
+
+        /* Consume the processed packet from buffer */
+        mqtt_buffer_consume(&client->recv_buf, packet_len);
     }
 
     return MQTT_OK;
