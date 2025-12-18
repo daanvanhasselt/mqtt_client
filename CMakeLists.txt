@@ -106,6 +106,7 @@ set(MQTT_CLIENT_SOURCES
     src/client/mqtt_packet_id.c
     src/client/mqtt_inflight.c
     src/client/mqtt_qos2_recv.c
+    src/client/mqtt_subscription_store.c
 )
 
 ################################################################################
@@ -158,7 +159,10 @@ set(MQTT_MEMORY_SOURCES
 )
 
 if(MQTT_ENABLE_POOL_ALLOCATOR)
-    list(APPEND MQTT_MEMORY_SOURCES src/memory/mqtt_pool.c)
+    list(APPEND MQTT_MEMORY_SOURCES
+        src/memory/mqtt_pool.c
+        src/memory/mqtt_multipool.c
+    )
 endif()
 
 ################################################################################
@@ -420,6 +424,105 @@ endif()
 if(MQTT_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
+
+################################################################################
+# Valgrind Support
+################################################################################
+option(MQTT_ENABLE_VALGRIND "Enable Valgrind memory testing targets" OFF)
+if(MQTT_ENABLE_VALGRIND OR MQTT_BUILD_TESTS)
+    include(${CMAKE_SOURCE_DIR}/cmake/valgrind.cmake OPTIONAL)
+endif()
+
+################################################################################
+# Documentation (Doxygen)
+################################################################################
+option(MQTT_BUILD_DOCS "Build API documentation with Doxygen" OFF)
+find_package(Doxygen QUIET)
+
+if(DOXYGEN_FOUND)
+    add_custom_target(docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/docs/Doxyfile
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Generating API documentation with Doxygen"
+        VERBATIM
+    )
+    message(STATUS "Doxygen found - 'make docs' target available")
+else()
+    message(STATUS "Doxygen not found - documentation target disabled")
+endif()
+
+################################################################################
+# Packaging (CPack)
+################################################################################
+
+set(CPACK_PACKAGE_NAME "mqtt-client")
+set(CPACK_PACKAGE_VENDOR "MQTT Client Library")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "High-performance MQTT client library in C")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
+set(CPACK_PACKAGE_CONTACT "https://github.com/mqtt-client")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/README.md")
+
+# Source package settings
+set(CPACK_SOURCE_GENERATOR "TGZ;ZIP")
+set(CPACK_SOURCE_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-src")
+set(CPACK_SOURCE_IGNORE_FILES
+    "/.git/"
+    "/build/"
+    "/.vscode/"
+    "/.idea/"
+    "\\\\.o$"
+    "\\\\.a$"
+    "\\\\.so$"
+    "\\\\.swp$"
+    "~$"
+)
+
+# Binary package settings
+set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+
+# Generator-specific settings
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CPACK_GENERATOR "TGZ;DEB;RPM")
+
+    # DEB package settings
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "MQTT Client Library")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6")
+    if(MQTT_ENABLE_TLS)
+        set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS}, libssl1.1 | libssl3")
+    endif()
+
+    # RPM package settings
+    set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+    set(CPACK_RPM_PACKAGE_GROUP "Development/Libraries")
+    set(CPACK_RPM_PACKAGE_REQUIRES "glibc")
+    if(MQTT_ENABLE_TLS)
+        set(CPACK_RPM_PACKAGE_REQUIRES "${CPACK_RPM_PACKAGE_REQUIRES}, openssl-libs")
+    endif()
+
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(CPACK_GENERATOR "TGZ")
+
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(CPACK_GENERATOR "ZIP;NSIS")
+    set(CPACK_NSIS_DISPLAY_NAME "MQTT Client Library ${PROJECT_VERSION}")
+    set(CPACK_NSIS_PACKAGE_NAME "mqtt-client")
+endif()
+
+# Component-based installation
+set(CPACK_COMPONENTS_ALL headers libraries)
+set(CPACK_COMPONENT_HEADERS_DISPLAY_NAME "Header Files")
+set(CPACK_COMPONENT_HEADERS_DESCRIPTION "C header files for development")
+set(CPACK_COMPONENT_LIBRARIES_DISPLAY_NAME "Libraries")
+set(CPACK_COMPONENT_LIBRARIES_DESCRIPTION "Static and shared libraries")
+set(CPACK_COMPONENT_LIBRARIES_REQUIRED ON)
+set(CPACK_COMPONENT_HEADERS_DEPENDS libraries)
+
+include(CPack)
 
 ################################################################################
 # Summary
