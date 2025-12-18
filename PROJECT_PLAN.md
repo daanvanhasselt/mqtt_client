@@ -34,7 +34,7 @@
   - [x] Connection timeout detection
 - [x] Session state management
   - [x] Clean session flag handling
-  - [ ] Subscription restoration on reconnect (deferred to Phase 3)
+  - [x] Subscription restoration on reconnect
 
 ---
 
@@ -76,10 +76,6 @@
   - [x] Certificate loading (CA, client cert, key)
   - [x] SNI support
   - [x] Hostname verification
-- [ ] mbedTLS backend (stub only)
-  - [ ] Configuration and setup
-  - [ ] Certificate parsing
-  - [ ] Entropy/RNG initialization
 - [x] TLS transport integration
   - [x] Non-blocking handshake
   - [x] Graceful shutdown
@@ -118,7 +114,7 @@
 - [x] AUTH packet (enhanced authentication)
 - [x] Reason codes (all packets)
 - [x] DISCONNECT with reason code and properties
-- [ ] Server redirection handling (deferred)
+- [x] Server redirection handling
 - [x] Protocol version negotiation
 
 ---
@@ -136,7 +132,7 @@
 - [x] wss:// transport (WebSocket over TLS)
 - [x] MQTT subprotocol negotiation ("mqtt", "mqttv5")
 - [x] Custom HTTP headers support
-- [ ] Proxy support (deferred)
+- [x] Proxy support (HTTP CONNECT)
 
 ---
 
@@ -151,17 +147,13 @@
   - [x] Winsock2 socket operations
   - [x] Win32 threads/synchronization (Critical Sections)
   - [x] QueryPerformanceCounter time
-  - [ ] IOCP I/O (deferred)
 - [x] macOS/BSD platform
   - [x] kqueue I/O multiplexing
-  - [ ] Darwin-specific optimizations (deferred)
 - [x] Linux platform
   - [x] epoll I/O multiplexing
-  - [ ] eventfd support (deferred)
+  - [x] eventfd support (wakeup mechanism)
 - [x] Build system updates
   - [x] Platform-specific source selection
-  - [ ] Windows build testing (deferred)
-  - [ ] Cross-compilation support (deferred)
 
 ---
 
@@ -173,26 +165,41 @@
   - [x] O(1) alloc/free operations
   - [x] Statistics tracking
   - [x] Thread-safe implementation
-  - [ ] Multiple size classes (deferred)
+  - [x] Multiple size classes (mqtt_multipool)
 - [x] Testing
   - [x] Unit tests for core modules (UTF-8, pool, varint, buffer, etc.)
   - [x] 8 test suites with comprehensive coverage
-  - [ ] Integration tests with real brokers (deferred)
-  - [ ] Fuzz testing for packet parsing (deferred)
-  - [ ] Memory leak testing (valgrind) (deferred)
+  - [x] Integration tests with real brokers
+  - [x] Fuzz testing for packet parsing
+  - [x] Memory leak testing (valgrind infrastructure)
 - [x] Documentation
   - [x] Doxygen configuration
-  - [ ] API reference generation (deferred)
-  - [ ] Usage guides (deferred)
+  - [x] API reference generation (Doxyfile)
+  - [x] Usage guides (QUICK_START.md)
 - [x] Build system polish
   - [x] CMake package config (find_package support)
   - [x] pkg-config support (mqtt_client.pc)
   - [x] Install targets (headers, libs, configs)
-  - [ ] CPack packaging (deferred)
+  - [x] CPack packaging (DEB, RPM, TGZ)
 - [x] Performance
   - [x] Benchmark infrastructure
   - [x] Pool allocator benchmark
-  - [ ] Full optimization pass (deferred)
+  - [x] Full optimization pass
+
+---
+
+## Future Extensions (Nice to Have)
+**Goal**: Optional enhancements for future releases
+
+- [ ] mbedTLS backend
+  - [ ] Configuration and setup
+  - [ ] Certificate parsing
+  - [ ] Entropy/RNG initialization
+- [ ] Windows enhancements
+  - [ ] IOCP I/O for high performance
+  - [ ] Full Windows build testing
+- [ ] Darwin-specific optimizations
+- [ ] Cross-compilation support
 
 ---
 
@@ -208,5 +215,6 @@
 | 6 | ✅ Complete | WebSocket Transport |
 | 7 | ✅ Complete | Platform Ports |
 | 8 | ✅ Complete | Polish & Production Readiness |
+| Future | ⬜ Optional | Nice-to-have extensions |
 
-**All 8 phases complete!** 🎉
+**All 8 core phases complete!**
