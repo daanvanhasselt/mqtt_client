@@ -24,3 +24,6 @@ endfunction()
 if(MQTT_ENABLE_POOL_ALLOCATOR)
     add_mqtt_benchmark(bench_pool bench_pool.c)
 endif()
+
+# Codec benchmark (always available)
+add_mqtt_benchmark(bench_codec bench_codec.c)
