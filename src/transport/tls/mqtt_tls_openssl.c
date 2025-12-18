@@ -12,6 +12,8 @@
  * - Non-blocking handshake
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "mqtt_tls.h"
 #include "mqtt/mqtt_config.h"
 
