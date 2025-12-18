@@ -1,18 +1,19 @@
 # MQTT Client Library
 
-A modern, lightweight MQTT client library written in C99 with support for MQTT 3.1.1, TLS encryption, and both synchronous and asynchronous APIs.
+A modern, lightweight MQTT client library written in C99 with support for MQTT 3.1.1 and 5.0, TLS encryption, WebSocket transport, and both synchronous and asynchronous APIs.
 
 ## Features
 
-- **MQTT 3.1.1 Protocol** - Full protocol support including all QoS levels
+- **MQTT 3.1.1 & 5.0 Protocol** - Full support for both protocol versions
 - **Quality of Service** - QoS 0 (at most once), QoS 1 (at least once), QoS 2 (exactly once)
 - **TLS/SSL Encryption** - Secure connections via OpenSSL backend
+- **WebSocket Transport** - ws:// and wss:// connections with MQTT subprotocol
 - **Synchronous API** - Simple blocking operations for straightforward use cases
 - **Asynchronous API** - Non-blocking operations with callback support
-- **Event Loop Integration** - Easy integration with external event loops (select/poll/epoll)
+- **Event Loop Integration** - Easy integration with external event loops (select/poll/epoll/kqueue)
 - **Thread Safety** - Optional mutex protection for multi-threaded applications
-- **Pluggable Transport** - Extensible transport layer (TCP, TLS, WebSocket planned)
-- **Cross-Platform** - POSIX-compliant (Linux, macOS), Windows support planned
+- **Memory Pool Allocator** - Optional high-performance fixed-size block allocator
+- **Cross-Platform** - POSIX-compliant (Linux, macOS), Windows stubs included
 - **Zero External Dependencies** - Only standard C library and optional TLS backend
 
 ## Quick Start
@@ -170,21 +171,23 @@ mqtt_set_callbacks(client, &callbacks);
 | Option | Default | Description |
 |--------|---------|-------------|
 | `MQTT_ENABLE_V311` | ON | Enable MQTT 3.1.1 support |
-| `MQTT_ENABLE_V5` | ON | Enable MQTT 5.0 support (not yet implemented) |
+| `MQTT_ENABLE_V5` | ON | Enable MQTT 5.0 support |
 | `MQTT_ENABLE_TLS` | ON | Enable TLS/SSL support |
 | `MQTT_TLS_BACKEND` | openssl | TLS backend: `openssl` or `mbedtls` |
-| `MQTT_ENABLE_WEBSOCKET` | OFF | Enable WebSocket transport (not yet implemented) |
+| `MQTT_ENABLE_WEBSOCKET` | OFF | Enable WebSocket transport |
 | `MQTT_THREAD_SAFE` | ON | Enable thread-safe operations |
+| `MQTT_ENABLE_POOL_ALLOCATOR` | OFF | Enable memory pool allocator |
 | `MQTT_BUILD_SHARED` | ON | Build shared library |
 | `MQTT_BUILD_STATIC` | ON | Build static library |
 | `MQTT_BUILD_EXAMPLES` | ON | Build example programs |
 | `MQTT_BUILD_TESTS` | ON | Build unit tests |
+| `MQTT_BUILD_BENCHMARKS` | OFF | Build performance benchmarks |
 
 ### Client Configuration
 
 ```c
 typedef struct {
-    mqtt_protocol_version_t protocol_version;  // MQTT_VERSION_3_1_1
+    mqtt_protocol_version_t protocol_version;  // MQTT_VERSION_3_1_1 or MQTT_VERSION_5_0
     size_t send_buffer_size;                   // Send buffer size (default: 4096)
     size_t recv_buffer_size;                   // Receive buffer size (default: 4096)
     size_t max_inflight_messages;              // Max QoS 1/2 in-flight (default: 10)
@@ -226,6 +229,55 @@ opts.transport_type = MQTT_TRANSPORT_TLS;
 opts.tls_config = &tls;
 
 mqtt_connect(client, &opts);
+```
+
+### WebSocket Connection
+
+```c
+mqtt_connect_opts_t opts = {0};
+opts.host = "broker.example.com";
+opts.port = 80;
+opts.transport_type = MQTT_TRANSPORT_WEBSOCKET;
+opts.ws_path = "/mqtt";  // WebSocket path
+
+mqtt_connect(client, &opts);
+```
+
+### WebSocket over TLS (wss://)
+
+```c
+mqtt_tls_config_t tls = {0};
+tls.verify_peer = true;
+
+mqtt_connect_opts_t opts = {0};
+opts.host = "broker.example.com";
+opts.port = 443;
+opts.transport_type = MQTT_TRANSPORT_WEBSOCKET_TLS;
+opts.ws_path = "/mqtt";
+opts.tls_config = &tls;
+
+mqtt_connect(client, &opts);
+```
+
+### MQTT 5.0 with Properties
+
+```c
+mqtt_client_config_t config = {0};
+config.protocol_version = MQTT_VERSION_5_0;
+
+mqtt_client_t *client = mqtt_client_create(&config);
+
+// Publish with MQTT 5.0 properties
+mqtt_publish_opts_t pub = {0};
+pub.topic = "sensor/data";
+pub.payload = data;
+pub.payload_len = len;
+pub.qos = MQTT_QOS_1;
+pub.content_type = "application/json";
+pub.message_expiry_interval = 3600;  // 1 hour expiry
+pub.response_topic = "response/topic";
+
+mqtt_publish(client, &pub);
 ```
 
 ### Event Loop Integration
@@ -282,13 +334,21 @@ mqtt_client/
 ├── src/
 │   ├── client/            # MQTT client implementation
 │   ├── core/              # Protocol utilities (varint, UTF-8)
-│   ├── memory/            # Buffer management
+│   ├── memory/            # Buffer management, pool allocator
 │   ├── platform/          # Platform abstraction (POSIX, Windows)
-│   ├── protocol/          # Protocol codecs (v3.1.1, v5.0)
-│   ├── transport/         # Transport layer (TCP, TLS, WebSocket)
+│   │   ├── posix/         # Linux/macOS implementation
+│   │   └── windows/       # Windows stubs
+│   ├── protocol/          # Protocol codecs
+│   │   ├── mqtt_v311/     # MQTT 3.1.1 codec
+│   │   └── mqtt_v5/       # MQTT 5.0 codec
+│   ├── transport/         # Transport layer
+│   │   ├── tcp/           # TCP transport
+│   │   ├── tls/           # TLS transport (OpenSSL)
+│   │   └── websocket/     # WebSocket transport
 │   └── util/              # Utilities
 ├── examples/              # Example programs
 ├── tests/                 # Unit tests
+├── benchmarks/            # Performance benchmarks
 └── cmake/                 # CMake modules
 ```
 
@@ -320,10 +380,33 @@ ctest --output-on-failure
 
 # Run specific test
 ./tests/test_buffer
+./tests/test_pool
+./tests/test_utf8
+
+# Run benchmarks (if enabled)
+cmake .. -DMQTT_BUILD_BENCHMARKS=ON -DMQTT_ENABLE_POOL_ALLOCATOR=ON
+make
+./benchmarks/bench_pool
 
 # Test against live broker
 ./examples/simple_publish test.mosquitto.org 1883 test/topic "Hello"
 ./examples/tls_publish test.mosquitto.org 8883 test/topic "Secure Hello"
+```
+
+## Installation
+
+```bash
+# Build and install
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+make
+sudo make install
+
+# Use with pkg-config
+pkg-config --cflags --libs mqtt_client
+
+# Use with CMake find_package
+find_package(mqtt_client REQUIRED)
+target_link_libraries(myapp mqtt::mqtt_client_shared)
 ```
 
 ## Roadmap
@@ -332,12 +415,12 @@ ctest --output-on-failure
 - [x] Phase 2: QoS & Session Management
 - [x] Phase 3: Async API & Event Loop
 - [x] Phase 4: TLS Support (OpenSSL)
-- [ ] Phase 5: MQTT 5.0 Protocol
-- [ ] Phase 6: WebSocket Transport
-- [ ] Phase 7: Platform Ports (Windows, macOS)
-- [ ] Phase 8: Production Polish
+- [x] Phase 5: MQTT 5.0 Protocol
+- [x] Phase 6: WebSocket Transport
+- [x] Phase 7: Platform Ports (Linux, macOS, Windows stubs)
+- [x] Phase 8: Production Polish
 
-See [PROJECT_PLAN.md](PROJECT_PLAN.md) for detailed progress.
+**All phases complete!** See [PROJECT_PLAN.md](PROJECT_PLAN.md) for detailed progress.
 
 ## License
 
