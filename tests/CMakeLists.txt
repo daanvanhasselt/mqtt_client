@@ -59,4 +59,34 @@ if(MQTT_ENABLE_POOL_ALLOCATOR)
 endif()
 
 # Integration tests (require network, run separately)
-# add_mqtt_test(test_broker_connect integration/test_broker_connect.c)
+# These are not included in regular `make test` - run manually or with label filter
+function(add_mqtt_integration_test TEST_NAME TEST_SOURCE)
+    add_executable(${TEST_NAME} ${TEST_SOURCE} ${TEST_COMMON_SOURCES})
+
+    target_link_libraries(${TEST_NAME} PRIVATE
+        mqtt_client_static
+        test_framework
+    )
+
+    target_include_directories(${TEST_NAME} PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_BINARY_DIR}/include
+    )
+
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+
+    # Integration tests have longer timeout and different label
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        TIMEOUT 120
+        LABELS "integration"
+    )
+endfunction()
+
+add_mqtt_integration_test(test_broker_connect integration/test_broker_connect.c)
+
+# Fuzz tests
+option(MQTT_BUILD_FUZZ_TESTS "Build fuzz tests" ON)
+if(MQTT_BUILD_FUZZ_TESTS)
+    add_subdirectory(fuzz)
+endif()

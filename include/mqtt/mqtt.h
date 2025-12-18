@@ -409,6 +409,48 @@ MQTT_API mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe
 MQTT_API mqtt_error_t mqtt_unsubscribe(mqtt_client_t *client, const char **topic_filters, size_t count);
 
 /**
+ * @brief Get the number of stored subscriptions
+ *
+ * Returns the count of subscriptions currently stored for potential restoration.
+ * When clean_session=false and the server loses the session (session_present=false),
+ * the stored subscriptions can be restored by calling mqtt_restore_subscriptions().
+ *
+ * @param client Client instance
+ * @return Number of stored subscriptions, or 0 if client is NULL or no subscriptions
+ *
+ * @see mqtt_restore_subscriptions
+ */
+MQTT_API size_t mqtt_get_stored_subscription_count(mqtt_client_t *client);
+
+/**
+ * @brief Restore previously active subscriptions
+ *
+ * Re-subscribes to all previously active topic filters. This is useful after
+ * reconnecting when the server did not preserve the session (session_present=false
+ * in CONNACK). Call this from the on_connect callback when session_present is false.
+ *
+ * @param client Client instance
+ * @return MQTT_OK on success, error code on failure
+ *
+ * @note This function blocks until all subscriptions are confirmed
+ * @note Subscriptions are cleared before re-subscribing to avoid duplicates
+ * @note If any subscription fails, the remaining subscriptions will still be stored
+ *
+ * @example
+ * @code
+ * void on_connect(mqtt_client_t *client, void *user_data, bool session_present) {
+ *     if (!session_present && mqtt_get_stored_subscription_count(client) > 0) {
+ *         mqtt_restore_subscriptions(client);
+ *     }
+ * }
+ * @endcode
+ *
+ * @see mqtt_get_stored_subscription_count
+ * @see mqtt_subscribe
+ */
+MQTT_API mqtt_error_t mqtt_restore_subscriptions(mqtt_client_t *client);
+
+/**
  * @brief Run the client event loop (synchronous)
  *
  * Processes network I/O and handles incoming messages and acknowledgments.

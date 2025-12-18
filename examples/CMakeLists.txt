@@ -14,3 +14,10 @@ if(MQTT_ENABLE_WEBSOCKET)
     add_executable(ws_publish ws_publish.c)
     target_link_libraries(ws_publish PRIVATE mqtt_client_static)
 endif()
+
+# Comprehensive demo showcasing all features
+add_executable(comprehensive_demo comprehensive_demo.c)
+target_link_libraries(comprehensive_demo PRIVATE mqtt_client_static)
+if(MQTT_ENABLE_V5)
+    target_compile_definitions(comprehensive_demo PRIVATE MQTT_V5_SUPPORT)
+endif()

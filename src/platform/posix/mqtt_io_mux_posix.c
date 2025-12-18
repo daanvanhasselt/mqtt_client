@@ -18,11 +18,14 @@
 #include <errno.h>
 #include <unistd.h>
 #include <poll.h>
+#include <fcntl.h>
 
 /* Platform-specific includes */
 #ifdef __linux__
     #include <sys/epoll.h>
+    #include <sys/eventfd.h>
     #define MQTT_HAS_EPOLL 1
+    #define MQTT_HAS_EVENTFD 1
 #endif
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -52,6 +55,17 @@ typedef struct mqtt_io_fd_entry {
 struct mqtt_io_mux {
     mqtt_io_mux_type_t type;   /**< Backend type */
     size_t max_events;         /**< Maximum events per wait */
+
+    /* Wakeup mechanism (eventfd on Linux, pipe elsewhere) */
+    struct {
+#ifdef MQTT_HAS_EVENTFD
+        int eventfd;               /**< eventfd for wakeup */
+#else
+        int pipe_read;             /**< Pipe read end */
+        int pipe_write;            /**< Pipe write end */
+#endif
+        bool initialized;          /**< Wakeup is initialized */
+    } wakeup;
 
     /* Backend-specific data */
     union {
@@ -111,6 +125,17 @@ const char *mqtt_io_mux_type_name(mqtt_io_mux_type_t type)
  * poll() Backend Implementation
  ******************************************************************************/
 
+static void init_wakeup_fields(mqtt_io_mux_t *mux)
+{
+    mux->wakeup.initialized = false;
+#ifdef MQTT_HAS_EVENTFD
+    mux->wakeup.eventfd = -1;
+#else
+    mux->wakeup.pipe_read = -1;
+    mux->wakeup.pipe_write = -1;
+#endif
+}
+
 static mqtt_io_mux_t *poll_create(size_t max_events)
 {
     mqtt_io_mux_t *mux = mqtt_calloc(1, sizeof(*mux));
@@ -118,6 +143,7 @@ static mqtt_io_mux_t *poll_create(size_t max_events)
 
     mux->type = MQTT_IO_MUX_POLL;
     mux->max_events = max_events;
+    init_wakeup_fields(mux);
 
     /* Initial capacity */
     size_t initial_cap = max_events > 16 ? max_events : 16;
@@ -333,6 +359,7 @@ static mqtt_io_mux_t *epoll_create_mux(size_t max_events)
 
     mux->type = MQTT_IO_MUX_EPOLL;
     mux->max_events = max_events;
+    init_wakeup_fields(mux);
 
     /* Create epoll instance */
     mux->backend.epoll.epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -458,6 +485,7 @@ static mqtt_io_mux_t *kqueue_create_mux(size_t max_events)
 
     mux->type = MQTT_IO_MUX_KQUEUE;
     mux->max_events = max_events;
+    init_wakeup_fields(mux);
 
     /* Create kqueue */
     mux->backend.kqueue.kq = kqueue();
@@ -633,6 +661,9 @@ void mqtt_io_mux_destroy(mqtt_io_mux_t *mux)
 {
     if (!mux) return;
 
+    /* Cleanup wakeup mechanism first */
+    mqtt_io_mux_wakeup_cleanup(mux);
+
     switch (mux->type) {
 #ifdef MQTT_HAS_EPOLL
         case MQTT_IO_MUX_EPOLL:
@@ -753,4 +784,154 @@ mqtt_io_mux_type_t mqtt_io_mux_get_type(mqtt_io_mux_t *mux)
 {
     if (!mux) return MQTT_IO_MUX_POLL;
     return mux->type;
+}
+
+/*******************************************************************************
+ * Wakeup Implementation
+ ******************************************************************************/
+
+mqtt_error_t mqtt_io_mux_wakeup_init(mqtt_io_mux_t *mux)
+{
+    if (!mux) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    if (mux->wakeup.initialized) {
+        return MQTT_OK;  /* Already initialized */
+    }
+
+#ifdef MQTT_HAS_EVENTFD
+    /* Linux: use eventfd */
+    mux->wakeup.eventfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (mux->wakeup.eventfd < 0) {
+        return MQTT_ERR_INTERNAL;
+    }
+
+    /* Register eventfd with the mux */
+    mqtt_error_t err = mqtt_io_mux_add(mux, mux->wakeup.eventfd, MQTT_IO_READ, NULL);
+    if (err != MQTT_OK) {
+        close(mux->wakeup.eventfd);
+        mux->wakeup.eventfd = -1;
+        return err;
+    }
+#else
+    /* POSIX fallback: use pipe */
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        return MQTT_ERR_INTERNAL;
+    }
+
+    mux->wakeup.pipe_read = pipefd[0];
+    mux->wakeup.pipe_write = pipefd[1];
+
+    /* Set non-blocking */
+    int flags = fcntl(mux->wakeup.pipe_read, F_GETFL, 0);
+    fcntl(mux->wakeup.pipe_read, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(mux->wakeup.pipe_write, F_GETFL, 0);
+    fcntl(mux->wakeup.pipe_write, F_SETFL, flags | O_NONBLOCK);
+
+    /* Register read end with the mux */
+    mqtt_error_t err = mqtt_io_mux_add(mux, mux->wakeup.pipe_read, MQTT_IO_READ, NULL);
+    if (err != MQTT_OK) {
+        close(mux->wakeup.pipe_read);
+        close(mux->wakeup.pipe_write);
+        mux->wakeup.pipe_read = -1;
+        mux->wakeup.pipe_write = -1;
+        return err;
+    }
+#endif
+
+    mux->wakeup.initialized = true;
+    return MQTT_OK;
+}
+
+void mqtt_io_mux_wakeup_cleanup(mqtt_io_mux_t *mux)
+{
+    if (!mux || !mux->wakeup.initialized) {
+        return;
+    }
+
+#ifdef MQTT_HAS_EVENTFD
+    if (mux->wakeup.eventfd >= 0) {
+        mqtt_io_mux_remove(mux, mux->wakeup.eventfd);
+        close(mux->wakeup.eventfd);
+        mux->wakeup.eventfd = -1;
+    }
+#else
+    if (mux->wakeup.pipe_read >= 0) {
+        mqtt_io_mux_remove(mux, mux->wakeup.pipe_read);
+        close(mux->wakeup.pipe_read);
+        mux->wakeup.pipe_read = -1;
+    }
+    if (mux->wakeup.pipe_write >= 0) {
+        close(mux->wakeup.pipe_write);
+        mux->wakeup.pipe_write = -1;
+    }
+#endif
+
+    mux->wakeup.initialized = false;
+}
+
+mqtt_error_t mqtt_io_mux_wakeup(mqtt_io_mux_t *mux)
+{
+    if (!mux || !mux->wakeup.initialized) {
+        return MQTT_ERR_INVALID_STATE;
+    }
+
+#ifdef MQTT_HAS_EVENTFD
+    uint64_t val = 1;
+    ssize_t ret = write(mux->wakeup.eventfd, &val, sizeof(val));
+    if (ret < 0 && errno != EAGAIN) {
+        return MQTT_ERR_INTERNAL;
+    }
+#else
+    char byte = 1;
+    ssize_t ret = write(mux->wakeup.pipe_write, &byte, 1);
+    if (ret < 0 && errno != EAGAIN) {
+        return MQTT_ERR_INTERNAL;
+    }
+#endif
+
+    return MQTT_OK;
+}
+
+mqtt_error_t mqtt_io_mux_wakeup_clear(mqtt_io_mux_t *mux)
+{
+    if (!mux || !mux->wakeup.initialized) {
+        return MQTT_ERR_INVALID_STATE;
+    }
+
+#ifdef MQTT_HAS_EVENTFD
+    uint64_t val;
+    /* Read and discard - clears the eventfd counter */
+    while (read(mux->wakeup.eventfd, &val, sizeof(val)) > 0) {
+        /* Drain all */
+    }
+#else
+    char buf[64];
+    /* Read and discard - drains the pipe */
+    while (read(mux->wakeup.pipe_read, buf, sizeof(buf)) > 0) {
+        /* Drain all */
+    }
+#endif
+
+    return MQTT_OK;
+}
+
+bool mqtt_io_mux_has_wakeup(mqtt_io_mux_t *mux)
+{
+    return mux && mux->wakeup.initialized;
+}
+
+mqtt_socket_t mqtt_io_mux_get_wakeup_fd(mqtt_io_mux_t *mux)
+{
+    if (!mux || !mux->wakeup.initialized) {
+        return -1;
+    }
+
+#ifdef MQTT_HAS_EVENTFD
+    return mux->wakeup.eventfd;
+#else
+    return mux->wakeup.pipe_read;
+#endif
 }

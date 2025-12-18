@@ -262,6 +262,33 @@ ssize_t ws_build_ping_frame(mqtt_buffer_t *buf, const uint8_t *data, size_t len)
  */
 ssize_t ws_build_pong_frame(mqtt_buffer_t *buf, const uint8_t *data, size_t len);
 
+/* ========================================================================== */
+/* HTTP CONNECT Proxy Support                                                  */
+/* ========================================================================== */
+
+/**
+ * @brief Build HTTP CONNECT request for proxy tunneling
+ *
+ * @param buf Output buffer
+ * @param target_host Target hostname to connect to through proxy
+ * @param target_port Target port number
+ * @param username Proxy username (NULL for no auth)
+ * @param password Proxy password (NULL for no auth)
+ * @return Number of bytes written, or negative error code
+ */
+ssize_t ws_build_proxy_connect(mqtt_buffer_t *buf, const char *target_host,
+                                uint16_t target_port, const char *username,
+                                const char *password);
+
+/**
+ * @brief Parse HTTP CONNECT response from proxy
+ *
+ * @param data Response data
+ * @param len Response length
+ * @return Bytes consumed on success (status 200), 0 if incomplete, negative on error
+ */
+int ws_parse_proxy_response(const uint8_t *data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
