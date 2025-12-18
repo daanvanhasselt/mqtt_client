@@ -1,0 +1,65 @@
+# Valgrind Suppression File for MQTT Client Library
+#
+# Add suppressions for known false positives or third-party library issues here.
+
+# Suppress dlopen-related issues (common in shared libraries)
+{
+   dlopen_conditional_jump
+   Memcheck:Cond
+   fun:_dl_relocate_object
+   ...
+}
+
+{
+   dlopen_value8
+   Memcheck:Value8
+   fun:_dl_relocate_object
+   ...
+}
+
+# Suppress getaddrinfo related issues (glibc)
+{
+   glibc_getaddrinfo
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   ...
+   fun:getaddrinfo
+   ...
+}
+
+# Suppress pthread initialization (glibc)
+{
+   pthread_create_init
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:pthread_create@@*
+   ...
+}
+
+# Suppress NSS initialization leaks (common with network functions)
+{
+   nss_init_leak
+   Memcheck:Leak
+   match-leak-kinds: definite,possible
+   ...
+   fun:*nss*
+   ...
+}
+
+# Suppress OpenSSL initialization (if TLS enabled)
+{
+   openssl_crypto_init
+   Memcheck:Leak
+   ...
+   fun:CRYPTO_*
+   ...
+}
+
+{
+   openssl_ssl_init
+   Memcheck:Leak
+   ...
+   fun:SSL_*
+   ...
+}
