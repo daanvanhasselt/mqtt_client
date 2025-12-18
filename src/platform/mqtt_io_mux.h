@@ -202,6 +202,75 @@ const char *mqtt_io_mux_type_name(mqtt_io_mux_type_t type);
  */
 mqtt_io_mux_type_t mqtt_io_mux_best_backend(void);
 
+/*******************************************************************************
+ * Wakeup Support (eventfd on Linux, pipe on others)
+ ******************************************************************************/
+
+/**
+ * @brief Initialize wakeup mechanism for the multiplexer
+ *
+ * Creates an eventfd (Linux) or pipe (other platforms) that can be used to
+ * wake up a thread blocked in mqtt_io_mux_wait() from another thread.
+ *
+ * @param mux Multiplexer handle
+ * @return MQTT_OK on success, error code otherwise
+ *
+ * @note The wakeup fd is automatically registered with the multiplexer.
+ * @note Call mqtt_io_mux_wakeup_cleanup() when done (or let destroy handle it).
+ */
+mqtt_error_t mqtt_io_mux_wakeup_init(mqtt_io_mux_t *mux);
+
+/**
+ * @brief Cleanup wakeup mechanism
+ *
+ * Releases resources used by the wakeup mechanism.
+ *
+ * @param mux Multiplexer handle
+ */
+void mqtt_io_mux_wakeup_cleanup(mqtt_io_mux_t *mux);
+
+/**
+ * @brief Signal wakeup to interrupt mqtt_io_mux_wait()
+ *
+ * Causes any thread blocked in mqtt_io_mux_wait() to return immediately.
+ * This is thread-safe and can be called from any thread.
+ *
+ * @param mux Multiplexer handle
+ * @return MQTT_OK on success, error code otherwise
+ */
+mqtt_error_t mqtt_io_mux_wakeup(mqtt_io_mux_t *mux);
+
+/**
+ * @brief Clear wakeup signal
+ *
+ * Clears the wakeup signal so subsequent waits will block normally.
+ * This should be called after mqtt_io_mux_wait() returns due to a wakeup
+ * to acknowledge and clear the signal.
+ *
+ * @param mux Multiplexer handle
+ * @return MQTT_OK on success
+ */
+mqtt_error_t mqtt_io_mux_wakeup_clear(mqtt_io_mux_t *mux);
+
+/**
+ * @brief Check if wakeup mechanism is initialized
+ *
+ * @param mux Multiplexer handle
+ * @return true if wakeup is initialized, false otherwise
+ */
+bool mqtt_io_mux_has_wakeup(mqtt_io_mux_t *mux);
+
+/**
+ * @brief Get wakeup file descriptor
+ *
+ * Returns the read-side file descriptor used for wakeup. This can be used
+ * to check if a ready event is the wakeup signal.
+ *
+ * @param mux Multiplexer handle
+ * @return Wakeup fd, or -1 if not initialized
+ */
+mqtt_socket_t mqtt_io_mux_get_wakeup_fd(mqtt_io_mux_t *mux);
+
 #ifdef __cplusplus
 }
 #endif
