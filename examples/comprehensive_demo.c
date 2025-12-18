@@ -770,49 +770,45 @@ static void demo_will_message(mqtt_client_t *client, const char *host, uint16_t 
     }
     printf("Will client connected!\n");
 
-    /* Simulate unexpected disconnect by destroying without proper disconnect.
+    /* Trigger LWT by letting keepalive timeout expire.
      *
-     * IMPORTANT: This is a best-effort LWT test with known limitations:
-     * - mqtt_client_destroy() sends a clean TCP FIN to close the connection
-     * - Per MQTT spec, will is only sent on "abnormal" network closure
-     * - Many brokers (including Mosquitto) may NOT send will on clean TCP close
-     * - LWT typically triggers on: keepalive timeout, network failure, I/O error
+     * How it works:
+     * - will_client has keepalive=5 seconds
+     * - We stop calling mqtt_loop() on will_client (simulating a hung/crashed client)
+     * - Broker expects PINGREQ within 1.5x keepalive (7.5 seconds)
+     * - When no PINGREQ arrives, broker considers connection lost and sends will
      *
-     * To reliably test LWT, you would need:
-     * - Kill the process without cleanup (e.g., kill -9)
-     * - Disconnect network cable or firewall the connection
-     * - Wait for keepalive timeout (1.5x keepalive interval)
+     * Note: We keep will_client alive (don't destroy it) but stop its event loop.
+     * The main client continues processing to receive the will message.
      */
-    printf("\nSimulating disconnect (destroying without mqtt_disconnect)...\n");
-    printf("Note: OS sends clean TCP FIN, so broker may not trigger will message.\n");
-    printf("LWT typically requires network failure or keepalive timeout.\n");
+    printf("\nSimulating client hang (stopping mqtt_loop on will_client)...\n");
+    printf("Broker will detect keepalive timeout after ~7.5 seconds (1.5x keepalive)...\n");
 
-    /* Don't call mqtt_disconnect - just destroy to simulate unexpected close */
-    mqtt_client_destroy(will_client);
-
-    /* Wait for will message - likely won't arrive due to clean TCP close */
-    printf("Waiting for will message (up to 8 seconds)...\n");
+    /* Wait for broker to detect keepalive timeout and send will message */
+    printf("Waiting for will message (up to 12 seconds)...\n");
     int prev_count = g_messages_received;
-    for (int i = 0; i < 80 && g_messages_received == prev_count && g_running; i++) {
+    for (int i = 0; i < 120 && g_messages_received == prev_count && g_running; i++) {
+        /* Only process main client - will_client is "hung" */
         mqtt_loop(client, 100);
-        if (i == 40) {
-            printf("  Still waiting... (4s elapsed)\n");
+        if (i == 50) {
+            printf("  Still waiting... (5s elapsed)\n");
+        } else if (i == 80) {
+            printf("  Still waiting... (8s elapsed)\n");
         }
     }
 
+    /* Clean up will_client (broker already closed connection due to keepalive timeout) */
+    mqtt_client_destroy(will_client);
+
     int will_received = g_messages_received - prev_count;
-    int will_client_connected = (err == MQTT_OK) ? 1 : 0;
 
     printf("\n--- Demo 4 Results ---\n");
     printf("  Will client:    Expected: connect     | Actual: %s\n", err == MQTT_OK ? "connected" : "FAILED");
-    if (will_received == 1) {
-        printf("  Will message:   Received! (broker sent on TCP close)\n");
-    } else {
-        printf("  Will message:   Not received (expected - see note above)\n");
-    }
+    printf("  Will message:   Expected: 1           | Actual: %d %s\n",
+           will_received, will_received == 1 ? "" : "<-- ISSUE");
 
-    /* Record will client connection (reliable test) rather than will message (unreliable in demo) */
-    record_result("Demo 4: Last Will (LWT)", "Will client connect", 1, will_client_connected);
+    record_result("Demo 4: Last Will (LWT)", "Will client connect", 1, err == MQTT_OK ? 1 : 0);
+    record_result("Demo 4: Last Will (LWT)", "Will message recv", 1, will_received);
 }
 
 #ifdef MQTT_V5_SUPPORT
@@ -876,7 +872,7 @@ static void demo_mqtt5_features(mqtt_client_t *client, const char *host, uint16_
     sub.topic_filter = sub_topic;
     sub.max_qos = MQTT_QOS_1;
     sub.subscription_id = 42;  /* MQTT 5.0: Subscription ID */
-    sub.no_local = true;       /* MQTT 5.0: Don't receive own publishes */
+    sub.no_local = false;      /* Receive own publishes to verify roundtrip */
 
     mqtt_subscribe(v5_client, &sub, 1);
     mqtt_loop(v5_client, 1000);
@@ -885,6 +881,8 @@ static void demo_mqtt5_features(mqtt_client_t *client, const char *host, uint16_
     printf("\nPublishing with MQTT 5.0 properties...\n");
     char pub_topic[128];
     snprintf(pub_topic, sizeof(pub_topic), "%s/v5/sensor_data", DEMO_TOPIC_BASE);
+
+    int prev_count = g_messages_received;
 
     mqtt_publish_opts_t pub = {0};
     pub.topic = pub_topic;
@@ -910,10 +908,12 @@ static void demo_mqtt5_features(mqtt_client_t *client, const char *host, uint16_
         printf("  Correlation Data: %s\n", (const char *)pub.correlation_data);
     }
 
-    /* Process responses */
-    for (int i = 0; i < 30 && g_running; i++) {
+    /* Process responses - wait for our own message to come back */
+    for (int i = 0; i < 30 && g_messages_received == prev_count && g_running; i++) {
         mqtt_loop(v5_client, 100);
     }
+
+    int v5_message_received = g_messages_received - prev_count;
 
     /* Disconnect with reason code */
     printf("\nDisconnecting MQTT 5.0 client with normal reason code...\n");
@@ -923,9 +923,11 @@ static void demo_mqtt5_features(mqtt_client_t *client, const char *host, uint16_
     printf("\n--- Demo 5 Results ---\n");
     printf("  V5 connect:     Expected: success     | Actual: %s\n", err == MQTT_OK ? "success" : "FAILED");
     printf("  V5 publish:     Expected: success     | Actual: %s\n", err == MQTT_OK ? "success" : "FAILED");
-    printf("  Note: no_local=true prevents receiving own publishes (expected behavior)\n");
+    printf("  V5 message:     Expected: 1           | Actual: %d %s\n",
+           v5_message_received, v5_message_received == 1 ? "" : "<-- ISSUE");
 
-    record_result("Demo 5: MQTT 5.0", "V5 operations", 1, err == MQTT_OK ? 1 : 0);
+    record_result("Demo 5: MQTT 5.0", "V5 connect", 1, err == MQTT_OK ? 1 : 0);
+    record_result("Demo 5: MQTT 5.0", "V5 message recv", 1, v5_message_received);
 }
 #endif /* MQTT_V5_SUPPORT */
 
@@ -1078,7 +1080,7 @@ static void demo_session_persistence(const char *host, uint16_t port)
         return;
     }
 
-    /* Subscribe - subscriptions are automatically stored for restoration */
+    /* Subscribe - broker will remember this subscription for our client_id */
     printf("Subscribing to: %s\n", topic);
     mqtt_subscribe_opts_t sub = {0};
     sub.topic_filter = topic;
@@ -1086,8 +1088,7 @@ static void demo_session_persistence(const char *host, uint16_t port)
     mqtt_subscribe(client1, &sub, 1);
     mqtt_loop(client1, 1000);
 
-    printf("Subscription stored automatically (count: %zu)\n",
-           mqtt_get_stored_subscription_count(client1));
+    printf("Subscription registered with broker (will persist after disconnect)\n");
 
     /* Disconnect gracefully */
     printf("Disconnecting (session remains on broker)...\n");
@@ -1121,22 +1122,19 @@ static void demo_session_persistence(const char *host, uint16_t port)
         return;
     }
 
-    /* Check if session was present */
-    printf("Session should be restored (check callback for session_present)\n");
-
-    /* Restore subscriptions from storage */
-    size_t sub_count = mqtt_get_stored_subscription_count(client2);
-    if (sub_count > 0) {
-        printf("Restoring %zu subscription(s) from local storage...\n", sub_count);
-        mqtt_error_t restore_err = mqtt_restore_subscriptions(client2);
-        if (restore_err == MQTT_OK) {
-            printf("Subscriptions restored successfully\n");
-        } else {
-            printf("Failed to restore subscriptions: %s\n", mqtt_error_str(restore_err));
-        }
-    } else {
-        printf("No stored subscriptions to restore\n");
-    }
+    /* Check if session was present - broker should report session_present=true
+     *
+     * NOTE: With clean_session=false, the BROKER keeps subscriptions server-side.
+     * When we reconnect with the same client_id, the broker already knows our
+     * subscriptions - we don't need to resubscribe! This is the whole point of
+     * persistent sessions in MQTT.
+     *
+     * The local mqtt_subscription_store is for CLIENT-SIDE tracking (e.g., knowing
+     * what you're subscribed to, or reconnecting to a DIFFERENT broker). It's not
+     * shared between client instances since each is a separate process/object.
+     */
+    printf("Session restored by broker (subscriptions preserved server-side)\n");
+    printf("No need to resubscribe - broker remembers our subscriptions!\n");
 
     /* Publish to test the restored subscription */
     char pub_topic[128];
