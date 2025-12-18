@@ -52,14 +52,9 @@ extern "C" {
 /** WebSocket transport support */
 #cmakedefine MQTT_ENABLE_WEBSOCKET
 
-/** TLS backend selection (1 = OpenSSL, 2 = mbedTLS) */
-#if defined(MQTT_ENABLE_TLS)
-    #if "@MQTT_TLS_BACKEND@" == "openssl"
-        #define MQTT_TLS_BACKEND_OPENSSL 1
-    #elif "@MQTT_TLS_BACKEND@" == "mbedtls"
-        #define MQTT_TLS_BACKEND_MBEDTLS 1
-    #endif
-#endif
+/** TLS backend selection */
+#cmakedefine MQTT_TLS_BACKEND_OPENSSL
+#cmakedefine MQTT_TLS_BACKEND_MBEDTLS
 
 /*******************************************************************************
  * Threading and Concurrency

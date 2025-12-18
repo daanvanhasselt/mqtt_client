@@ -66,6 +66,17 @@ else()
 endif()
 
 ################################################################################
+# TLS Backend Selection for Config Header
+################################################################################
+if(MQTT_ENABLE_TLS)
+    if(MQTT_TLS_BACKEND STREQUAL "openssl")
+        set(MQTT_TLS_BACKEND_OPENSSL TRUE)
+    elseif(MQTT_TLS_BACKEND STREQUAL "mbedtls")
+        set(MQTT_TLS_BACKEND_MBEDTLS TRUE)
+    endif()
+endif()
+
+################################################################################
 # Configuration Header Generation
 ################################################################################
 include(GNUInstallDirs)
