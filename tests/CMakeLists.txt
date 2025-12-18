@@ -47,5 +47,8 @@ if(MQTT_ENABLE_V5)
     add_mqtt_test(test_mqtt_v5_properties unit/test_mqtt_v5_properties.c)
 endif()
 
+# Platform Tests
+add_mqtt_test(test_io_mux unit/test_io_mux.c)
+
 # Integration tests (require network, run separately)
 # add_mqtt_test(test_broker_connect integration/test_broker_connect.c)

@@ -135,13 +135,16 @@ endif()
 ################################################################################
 if(MQTT_PLATFORM_WINDOWS)
     set(MQTT_PLATFORM_SOURCES
-        # TODO: Add Windows platform sources
+        src/platform/windows/mqtt_socket_windows.c
+        src/platform/windows/mqtt_time_windows.c
+        src/platform/windows/mqtt_thread_windows.c
     )
 elseif(MQTT_PLATFORM_LINUX OR MQTT_PLATFORM_MACOS)
     set(MQTT_PLATFORM_SOURCES
         src/platform/posix/mqtt_socket_posix.c
         src/platform/posix/mqtt_time_posix.c
         src/platform/posix/mqtt_thread_posix.c
+        src/platform/posix/mqtt_io_mux_posix.c
     )
 endif()
 
