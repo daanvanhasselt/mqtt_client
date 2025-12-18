@@ -278,6 +278,9 @@ mqtt_client_t *mqtt_client_create(const mqtt_client_config_t *config)
     /* Initialize QoS 2 receive tracker */
     mqtt_qos2_recv_init(&client->qos2_recv, client->config.max_inflight_messages);
 
+    /* Initialize subscription store */
+    mqtt_subscription_store_init(&client->subscriptions);
+
 #ifdef MQTT_THREAD_SAFE
     err = mqtt_mutex_init(&client->lock);
     if (err != MQTT_OK) {
@@ -313,6 +316,9 @@ void mqtt_client_destroy(mqtt_client_t *client)
 
     /* Cleanup QoS 2 receive tracker */
     mqtt_qos2_recv_cleanup(&client->qos2_recv);
+
+    /* Cleanup subscription store */
+    mqtt_subscription_store_cleanup(&client->subscriptions);
 
     /* Cleanup buffers */
     mqtt_buffer_cleanup(&client->send_buf);
@@ -471,6 +477,34 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
 
         /* Check reason code */
         if (connack_v5.reason_code != MQTT_RC_SUCCESS) {
+            /* Check for server redirection */
+            if (connack_v5.reason_code == MQTT_RC_USE_ANOTHER_SERVER ||
+                connack_v5.reason_code == MQTT_RC_SERVER_MOVED) {
+                /* Extract server reference property */
+                const char *server_ref = NULL;
+                mqtt_property_t *prop = mqtt_property_find(connack_v5.properties,
+                                                           MQTT_PROP_SERVER_REFERENCE);
+                if (prop && prop->type == MQTT_PROP_TYPE_UTF8_STRING) {
+                    server_ref = prop->value.str;
+                }
+
+                /* Invoke redirect callback if set */
+                if (client->callbacks.on_redirect) {
+                    bool is_permanent = (connack_v5.reason_code == MQTT_RC_SERVER_MOVED);
+                    client->callbacks.on_redirect(client, client->callbacks.user_data,
+                                                  server_ref, is_permanent);
+                }
+
+                /* Set appropriate error code */
+                err = (connack_v5.reason_code == MQTT_RC_SERVER_MOVED)
+                    ? MQTT_ERR_V5_SERVER_MOVED
+                    : MQTT_ERR_V5_USE_ANOTHER_SERVER;
+                mqtt_property_list_free(connack_v5.properties);
+                client->last_error = err;
+                client->state = MQTT_STATE_DISCONNECTED;  /* Not error state - can reconnect */
+                return err;
+            }
+
             /* Map MQTT 5.0 reason code to error */
             switch (connack_v5.reason_code) {
                 case MQTT_RC_UNSUPPORTED_PROTOCOL_VERSION: err = MQTT_ERR_V311_UNACCEPTABLE_PROTOCOL; break;
@@ -534,15 +568,18 @@ mqtt_error_t mqtt_connect(mqtt_client_t *client, const mqtt_connect_opts_t *opts
 
     /* Handle session state based on clean_session and session_present */
     if (client->clean_session) {
-        /* Clean session requested - clear any previous inflight state */
+        /* Clean session requested - clear any previous inflight state and subscriptions */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
         mqtt_qos2_recv_clear(&client->qos2_recv);
+        mqtt_subscription_store_clear(&client->subscriptions);
     } else if (!session_present) {
-        /* Server didn't have a session for us - clear our state too */
+        /* Server didn't have a session for us - clear inflight state but keep subscriptions
+         * for restoration. User can call mqtt_restore_subscriptions() to re-subscribe. */
         mqtt_inflight_clear(&client->inflight);
         mqtt_packet_id_reset(&client->packet_ids);
         mqtt_qos2_recv_clear(&client->qos2_recv);
+        /* Note: We keep subscriptions for potential restoration */
     }
     /* If clean_session=false AND session_present=true, we keep our inflight state
      * and can retry any pending QoS 1/2 messages on next loop iteration */
@@ -919,6 +956,29 @@ mqtt_error_t mqtt_subscribe(mqtt_client_t *client, const mqtt_subscribe_opts_t *
         }
     }
 
+    /* Store successful subscriptions for session restoration */
+    for (size_t i = 0; i < count; i++) {
+        if (suback.return_codes[i] != 0x80) {
+            /* Subscription succeeded - add to store */
+#ifdef MQTT_ENABLE_V5
+            if (client->protocol_version == MQTT_VERSION_5_0) {
+                mqtt_subscription_store_add_v5(&client->subscriptions,
+                                               opts[i].topic_filter,
+                                               (mqtt_qos_t)suback.return_codes[i],
+                                               opts[i].subscription_id,
+                                               opts[i].no_local,
+                                               opts[i].retain_as_published,
+                                               opts[i].retain_handling);
+            } else
+#endif
+            {
+                mqtt_subscription_store_add(&client->subscriptions,
+                                            opts[i].topic_filter,
+                                            (mqtt_qos_t)suback.return_codes[i]);
+            }
+        }
+    }
+
     /* Free the return codes array */
     mqtt_free(suback.return_codes);
 
@@ -1020,11 +1080,81 @@ mqtt_error_t mqtt_unsubscribe(mqtt_client_t *client, const char **topic_filters,
         return MQTT_ERR_PROTOCOL;
     }
 
+    /* Remove subscriptions from store */
+    for (size_t i = 0; i < count; i++) {
+        mqtt_subscription_store_remove(&client->subscriptions, topic_filters[i]);
+    }
+
     /* Free the packet ID - UNSUBACK received successfully */
     mqtt_client_free_packet_id(client, packet_id);
     mqtt_buffer_reset(&client->recv_buf);
 
     return MQTT_OK;
+}
+
+/* ========================================================================== */
+/* Subscription Restoration                                                   */
+/* ========================================================================== */
+
+size_t mqtt_get_stored_subscription_count(mqtt_client_t *client)
+{
+    if (!client) {
+        return 0;
+    }
+    return mqtt_subscription_store_count(&client->subscriptions);
+}
+
+mqtt_error_t mqtt_restore_subscriptions(mqtt_client_t *client)
+{
+    if (!client) {
+        return MQTT_ERR_INVALID_ARG;
+    }
+
+    if (client->state != MQTT_STATE_CONNECTED) {
+        return MQTT_ERR_NOT_CONNECTED;
+    }
+
+    size_t count = mqtt_subscription_store_count(&client->subscriptions);
+    if (count == 0) {
+        return MQTT_OK;  /* Nothing to restore */
+    }
+
+    /* Build array of subscription options from stored subscriptions */
+    mqtt_subscribe_opts_t *opts = mqtt_malloc(sizeof(mqtt_subscribe_opts_t) * count);
+    if (!opts) {
+        return MQTT_ERR_NOMEM;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const mqtt_subscription_entry_t *entry = mqtt_subscription_store_get(&client->subscriptions, i);
+        if (!entry) {
+            mqtt_free(opts);
+            return MQTT_ERR_INTERNAL;
+        }
+
+        memset(&opts[i], 0, sizeof(opts[i]));
+        opts[i].topic_filter = entry->topic_filter;
+        opts[i].max_qos = entry->granted_qos;
+
+#ifdef MQTT_ENABLE_V5
+        if (client->protocol_version == MQTT_VERSION_5_0) {
+            opts[i].subscription_id = entry->subscription_id;
+            opts[i].no_local = entry->no_local;
+            opts[i].retain_as_published = entry->retain_as_published;
+            opts[i].retain_handling = entry->retain_handling;
+        }
+#endif
+    }
+
+    /* Clear the store before re-subscribing to avoid duplicates */
+    mqtt_subscription_store_clear(&client->subscriptions);
+
+    /* Re-subscribe to all topics */
+    mqtt_error_t err = mqtt_subscribe(client, opts, count);
+
+    mqtt_free(opts);
+
+    return err;
 }
 
 /* ========================================================================== */

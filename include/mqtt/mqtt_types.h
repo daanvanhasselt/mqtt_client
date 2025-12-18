@@ -101,12 +101,24 @@ typedef struct {
 } mqtt_tls_config_t;
 
 /**
+ * @brief HTTP proxy configuration for WebSocket connections
+ */
+typedef struct mqtt_proxy_config {
+    const char *host;                  /**< Proxy hostname or IP */
+    uint16_t port;                     /**< Proxy port (default: 80 for HTTP, 443 for HTTPS) */
+    const char *username;              /**< Proxy authentication username (NULL for none) */
+    const char *password;              /**< Proxy authentication password (NULL for none) */
+    bool use_tls;                      /**< Use TLS to connect to proxy (HTTPS proxy) */
+} mqtt_proxy_config_t;
+
+/**
  * @brief WebSocket configuration
  */
 typedef struct {
     const char *path;                  /**< WebSocket path (default: "/mqtt") */
     const char *subprotocol;           /**< WebSocket subprotocol (e.g., "mqtt") */
     const char **extra_headers;        /**< NULL-terminated array of extra HTTP headers */
+    mqtt_proxy_config_t *proxy;        /**< HTTP CONNECT proxy configuration (NULL for direct) */
 } mqtt_ws_config_t;
 
 /**
@@ -288,6 +300,20 @@ typedef void (*mqtt_on_subscribe_cb)(mqtt_client_t *client, void *user_data, uin
                                      const mqtt_qos_t *granted_qos, size_t count);
 
 /**
+ * @brief Server redirect callback (MQTT 5.0)
+ *
+ * Called when the server requests the client to connect to a different server.
+ * This happens with reason codes 0x9C (Use Another Server) or 0x9D (Server Moved).
+ *
+ * @param client MQTT client handle
+ * @param user_data User-provided context data
+ * @param server_reference New server address (e.g., "host:port" or "host")
+ * @param is_permanent true if server moved permanently (0x9D), false if temporary (0x9C)
+ */
+typedef void (*mqtt_on_redirect_cb)(mqtt_client_t *client, void *user_data,
+                                     const char *server_reference, bool is_permanent);
+
+/**
  * @brief Callback functions bundle
  */
 typedef struct {
@@ -297,6 +323,7 @@ typedef struct {
     mqtt_on_publish_complete_cb on_publish_complete; /**< Publish complete callback */
     mqtt_on_publish_failed_cb on_publish_failed;  /**< Publish failed callback */
     mqtt_on_subscribe_cb on_subscribe;            /**< Subscribe complete callback */
+    mqtt_on_redirect_cb on_redirect;              /**< Server redirect callback (MQTT 5.0) */
     void *user_data;                              /**< User-provided context data */
 } mqtt_callbacks_t;
 
