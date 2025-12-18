@@ -124,7 +124,10 @@ if(MQTT_ENABLE_TLS)
 endif()
 
 if(MQTT_ENABLE_WEBSOCKET)
-    # TODO: list(APPEND MQTT_TRANSPORT_SOURCES src/transport/websocket/websocket_transport.c)
+    list(APPEND MQTT_TRANSPORT_SOURCES
+        src/transport/websocket/mqtt_websocket.c
+        src/transport/websocket/mqtt_ws_transport.c
+    )
 endif()
 
 ################################################################################

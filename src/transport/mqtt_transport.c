@@ -16,6 +16,10 @@
 #include "tls/mqtt_tls.h"
 #endif
 
+#ifdef MQTT_ENABLE_WEBSOCKET
+/* WebSocket transport factory is declared in mqtt_transport.h */
+#endif
+
 /*******************************************************************************
  * Transport Factory Functions
  ******************************************************************************/
@@ -27,7 +31,9 @@ mqtt_transport_t *mqtt_transport_create(mqtt_transport_type_t type,
 #ifndef MQTT_ENABLE_TLS
     (void)tls_config;  /* Unused when TLS is disabled */
 #endif
-    (void)ws_config;  /* Unused for now (WebSocket not implemented) */
+#ifndef MQTT_ENABLE_WEBSOCKET
+    (void)ws_config;  /* Unused when WebSocket is disabled */
+#endif
 
     switch (type) {
         case MQTT_TRANSPORT_TCP:
@@ -45,8 +51,11 @@ mqtt_transport_t *mqtt_transport_create(mqtt_transport_type_t type,
 
         case MQTT_TRANSPORT_WS:
 #ifdef MQTT_ENABLE_WEBSOCKET
-            /* TODO: Implement WebSocket transport creation */
-            return NULL;
+            {
+                mqtt_transport_t *tcp = mqtt_transport_tcp_create();
+                if (!tcp) return NULL;
+                return mqtt_transport_ws_create(tcp, ws_config);
+            }
 #else
             return NULL;
 #endif
@@ -56,8 +65,11 @@ mqtt_transport_t *mqtt_transport_create(mqtt_transport_type_t type,
             if (tls_config == NULL) {
                 return NULL;
             }
-            /* TODO: Implement WebSocket Secure transport creation */
-            return NULL;
+            {
+                mqtt_transport_t *tls = mqtt_transport_tls_create(tls_config);
+                if (!tls) return NULL;
+                return mqtt_transport_ws_create(tls, ws_config);
+            }
 #else
             return NULL;
 #endif

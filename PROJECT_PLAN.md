@@ -123,20 +123,20 @@
 
 ---
 
-## Phase 6: WebSocket Transport
+## Phase 6: WebSocket Transport ✅
 **Goal**: WebSocket (ws:// and wss://) support
 
-- [ ] WebSocket protocol implementation
-  - [ ] HTTP upgrade handshake
-  - [ ] Frame encoding/decoding
-  - [ ] Masking (client to server)
-  - [ ] Control frames (ping/pong/close)
-  - [ ] Continuation frames
-- [ ] ws:// transport (plain WebSocket)
-- [ ] wss:// transport (WebSocket over TLS)
-- [ ] MQTT subprotocol negotiation ("mqtt", "mqttv5")
-- [ ] Custom HTTP headers support
-- [ ] Proxy support (optional)
+- [x] WebSocket protocol implementation
+  - [x] HTTP upgrade handshake
+  - [x] Frame encoding/decoding
+  - [x] Masking (client to server)
+  - [x] Control frames (ping/pong/close)
+  - [x] Continuation frames
+- [x] ws:// transport (plain WebSocket)
+- [x] wss:// transport (WebSocket over TLS)
+- [x] MQTT subprotocol negotiation ("mqtt", "mqttv5")
+- [x] Custom HTTP headers support
+- [ ] Proxy support (deferred)
 
 ---
 
@@ -200,6 +200,6 @@
 | 3 | ✅ Complete | Async API & Event Loop |
 | 4 | ✅ Complete | TLS Support (OpenSSL backend) |
 | 5 | ✅ Complete | MQTT 5.0 Protocol |
-| 6 | ⬜ Not started | WebSocket Transport |
+| 6 | ✅ Complete | WebSocket Transport |
 | 7 | ⬜ Not started | Platform Ports |
 | 8 | ⬜ Not started | Polish & Production Readiness |

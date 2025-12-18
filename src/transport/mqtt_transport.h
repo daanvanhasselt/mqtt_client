@@ -156,6 +156,22 @@ struct mqtt_transport {
 mqtt_transport_t *mqtt_transport_tcp_create(void);
 
 /**
+ * @brief Create a WebSocket transport instance
+ *
+ * Creates a WebSocket transport that wraps an underlying TCP or TLS transport.
+ * The underlying transport must already be created but not connected.
+ *
+ * @param underlying Underlying TCP or TLS transport (ownership transferred)
+ * @param config WebSocket configuration (can be NULL for defaults)
+ * @return Transport instance on success, NULL on failure
+ *
+ * @note The caller must destroy the transport using mqtt_transport_destroy()
+ *       when done. This will also destroy the underlying transport.
+ */
+mqtt_transport_t *mqtt_transport_ws_create(mqtt_transport_t *underlying,
+                                            const mqtt_ws_config_t *config);
+
+/**
  * @brief Create a transport instance of specified type
  *
  * This is a generic factory function that creates transports based on type.
