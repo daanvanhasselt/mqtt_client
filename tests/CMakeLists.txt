@@ -50,5 +50,13 @@ endif()
 # Platform Tests
 add_mqtt_test(test_io_mux unit/test_io_mux.c)
 
+# Core Tests
+add_mqtt_test(test_utf8 unit/test_utf8.c)
+
+# Memory Tests
+if(MQTT_ENABLE_POOL_ALLOCATOR)
+    add_mqtt_test(test_pool unit/test_pool.c)
+endif()
+
 # Integration tests (require network, run separately)
 # add_mqtt_test(test_broker_connect integration/test_broker_connect.c)

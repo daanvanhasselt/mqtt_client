@@ -46,6 +46,7 @@ option(MQTT_BUILD_STATIC "Build static library" ON)
 # Additional Components
 option(MQTT_BUILD_EXAMPLES "Build example programs" ON)
 option(MQTT_BUILD_TESTS "Build unit tests" ON)
+option(MQTT_BUILD_BENCHMARKS "Build performance benchmarks" OFF)
 option(MQTT_ENABLE_LOGGING "Enable debug logging" ON)
 
 ################################################################################
@@ -157,7 +158,7 @@ set(MQTT_MEMORY_SOURCES
 )
 
 if(MQTT_ENABLE_POOL_ALLOCATOR)
-    # TODO: list(APPEND MQTT_MEMORY_SOURCES src/memory/mqtt_pool.c)
+    list(APPEND MQTT_MEMORY_SOURCES src/memory/mqtt_pool.c)
 endif()
 
 ################################################################################
@@ -367,6 +368,43 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mqtt_client
 )
 
+# Generate and install pkg-config file
+configure_file(
+    "${PROJECT_SOURCE_DIR}/cmake/mqtt_client.pc.in"
+    "${PROJECT_BINARY_DIR}/mqtt_client.pc"
+    @ONLY
+)
+
+install(FILES "${PROJECT_BINARY_DIR}/mqtt_client.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)
+
+################################################################################
+# Documentation (Doxygen)
+################################################################################
+find_package(Doxygen QUIET)
+if(DOXYGEN_FOUND)
+    option(MQTT_BUILD_DOCS "Build API documentation" OFF)
+    if(MQTT_BUILD_DOCS)
+        set(DOXYGEN_PROJECT_NAME "MQTT Client Library")
+        set(DOXYGEN_PROJECT_VERSION ${PROJECT_VERSION})
+        set(DOXYGEN_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/docs")
+        set(DOXYGEN_EXTRACT_ALL YES)
+        set(DOXYGEN_EXTRACT_STATIC YES)
+        set(DOXYGEN_GENERATE_HTML YES)
+        set(DOXYGEN_GENERATE_MAN NO)
+        set(DOXYGEN_OPTIMIZE_OUTPUT_FOR_C YES)
+        set(DOXYGEN_SORT_MEMBER_DOCS YES)
+        set(DOXYGEN_WARN_IF_UNDOCUMENTED NO)
+
+        doxygen_add_docs(docs
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/src
+            COMMENT "Generating API documentation"
+        )
+    endif()
+endif()
+
 ################################################################################
 # Subdirectories
 ################################################################################
@@ -377,6 +415,10 @@ endif()
 if(MQTT_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(MQTT_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()
 
 ################################################################################
@@ -408,4 +450,5 @@ message(STATUS "  Build Shared: ${MQTT_BUILD_SHARED}")
 message(STATUS "  Build Static: ${MQTT_BUILD_STATIC}")
 message(STATUS "  Build Examples: ${MQTT_BUILD_EXAMPLES}")
 message(STATUS "  Build Tests: ${MQTT_BUILD_TESTS}")
+message(STATUS "  Build Benchmarks: ${MQTT_BUILD_BENCHMARKS}")
 message(STATUS "")
