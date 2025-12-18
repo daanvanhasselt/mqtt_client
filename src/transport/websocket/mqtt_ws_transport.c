@@ -126,13 +126,80 @@ static mqtt_error_t ws_transport_connect(mqtt_transport_t *transport,
         return MQTT_ERR_NOMEM;
     }
 
-    /* Connect underlying transport */
-    err = mqtt_transport_connect(ws->underlying, host, port, timeout_ms);
-    if (err != MQTT_OK) {
-        mqtt_free(ws->host);
-        ws->host = NULL;
-        ws->base.last_error = err;
-        return err;
+    /* Check if proxy is configured */
+    if (ws->config.proxy && ws->config.proxy->host) {
+        /* Connect to proxy instead of target */
+        uint16_t proxy_port = ws->config.proxy->port ? ws->config.proxy->port : 80;
+        err = mqtt_transport_connect(ws->underlying, ws->config.proxy->host,
+                                     proxy_port, timeout_ms);
+        if (err != MQTT_OK) {
+            mqtt_free(ws->host);
+            ws->host = NULL;
+            ws->base.last_error = err;
+            return err;
+        }
+
+        /* Build and send HTTP CONNECT request */
+        mqtt_buffer_reset(&ws->send_buf);
+        ssize_t req_len = ws_build_proxy_connect(&ws->send_buf, host, port,
+                                                  ws->config.proxy->username,
+                                                  ws->config.proxy->password);
+        if (req_len < 0) {
+            mqtt_transport_disconnect(ws->underlying);
+            mqtt_free(ws->host);
+            ws->host = NULL;
+            ws->base.last_error = (mqtt_error_t)(-req_len);
+            return (mqtt_error_t)(-req_len);
+        }
+
+        ssize_t sent = mqtt_transport_send(ws->underlying, ws->send_buf.data, ws->send_buf.len);
+        if (sent < 0 || (size_t)sent != ws->send_buf.len) {
+            mqtt_transport_disconnect(ws->underlying);
+            mqtt_free(ws->host);
+            ws->host = NULL;
+            ws->base.last_error = (sent < 0) ? (mqtt_error_t)(-sent) : MQTT_ERR_SEND_FAILED;
+            return ws->base.last_error;
+        }
+
+        /* Receive and parse proxy response */
+        mqtt_buffer_reset(&ws->recv_buf);
+        mqtt_buffer_reserve(&ws->recv_buf, 2048);
+
+        int response_len = 0;
+        while (response_len == 0) {
+            ssize_t received = mqtt_transport_recv(ws->underlying,
+                                                    ws->recv_buf.data + ws->recv_buf.len,
+                                                    ws->recv_buf.capacity - ws->recv_buf.len);
+            if (received <= 0) {
+                mqtt_transport_disconnect(ws->underlying);
+                mqtt_free(ws->host);
+                ws->host = NULL;
+                ws->base.last_error = MQTT_ERR_CONNECTION_LOST;
+                return MQTT_ERR_CONNECTION_LOST;
+            }
+
+            ws->recv_buf.len += (size_t)received;
+            response_len = ws_parse_proxy_response(ws->recv_buf.data, ws->recv_buf.len);
+            if (response_len < 0) {
+                mqtt_transport_disconnect(ws->underlying);
+                mqtt_free(ws->host);
+                ws->host = NULL;
+                ws->base.last_error = (mqtt_error_t)(-response_len);
+                return (mqtt_error_t)(-response_len);
+            }
+        }
+
+        /* Clear buffer for WebSocket handshake */
+        mqtt_buffer_reset(&ws->recv_buf);
+    } else {
+        /* Connect directly to target */
+        err = mqtt_transport_connect(ws->underlying, host, port, timeout_ms);
+        if (err != MQTT_OK) {
+            mqtt_free(ws->host);
+            ws->host = NULL;
+            ws->base.last_error = err;
+            return err;
+        }
     }
 
     ws->base.status = MQTT_TRANSPORT_CONNECTING;

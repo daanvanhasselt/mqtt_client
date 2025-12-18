@@ -553,3 +553,121 @@ ssize_t ws_build_pong_frame(mqtt_buffer_t *buf, const uint8_t *data, size_t len)
     if (len > 125) len = 125;  /* Max control frame payload */
     return ws_frame_encode(buf, WS_OPCODE_PONG, data, len, true, true);
 }
+
+/* ========================================================================== */
+/* HTTP CONNECT Proxy Support                                                  */
+/* ========================================================================== */
+
+ssize_t ws_build_proxy_connect(mqtt_buffer_t *buf, const char *target_host,
+                                uint16_t target_port, const char *username,
+                                const char *password)
+{
+    if (!buf || !target_host) {
+        return -MQTT_ERR_INVALID_ARG;
+    }
+
+    /* Reserve space for request */
+    mqtt_buffer_reserve(buf, 512);
+
+    /* Build CONNECT request line */
+    int written = snprintf((char *)buf->data + buf->len, buf->capacity - buf->len,
+                           "CONNECT %s:%u HTTP/1.1\r\n"
+                           "Host: %s:%u\r\n",
+                           target_host, target_port,
+                           target_host, target_port);
+    if (written < 0 || (size_t)written >= buf->capacity - buf->len) {
+        return -MQTT_ERR_BUFFER_OVERFLOW;
+    }
+    buf->len += (size_t)written;
+
+    /* Add Proxy-Authorization if credentials provided */
+    if (username && password) {
+        /* Build credentials string */
+        char creds[256];
+        int creds_len = snprintf(creds, sizeof(creds), "%s:%s", username, password);
+        if (creds_len < 0 || (size_t)creds_len >= sizeof(creds)) {
+            return -MQTT_ERR_BUFFER_OVERFLOW;
+        }
+
+        /* Base64 encode credentials (simple implementation) */
+        static const char b64_table[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        size_t in_len = (size_t)creds_len;
+        size_t out_len = 4 * ((in_len + 2) / 3);
+        char b64_creds[384];
+
+        if (out_len >= sizeof(b64_creds)) {
+            return -MQTT_ERR_BUFFER_OVERFLOW;
+        }
+
+        size_t i, j;
+        for (i = 0, j = 0; i < in_len;) {
+            uint32_t a = i < in_len ? (uint8_t)creds[i++] : 0;
+            uint32_t b = i < in_len ? (uint8_t)creds[i++] : 0;
+            uint32_t c = i < in_len ? (uint8_t)creds[i++] : 0;
+            uint32_t triple = (a << 16) | (b << 8) | c;
+
+            b64_creds[j++] = b64_table[(triple >> 18) & 0x3F];
+            b64_creds[j++] = b64_table[(triple >> 12) & 0x3F];
+            b64_creds[j++] = b64_table[(triple >> 6) & 0x3F];
+            b64_creds[j++] = b64_table[triple & 0x3F];
+        }
+
+        /* Add padding */
+        size_t padding = (3 - (in_len % 3)) % 3;
+        for (size_t p = 0; p < padding; p++) {
+            b64_creds[out_len - 1 - p] = '=';
+        }
+        b64_creds[out_len] = '\0';
+
+        written = snprintf((char *)buf->data + buf->len, buf->capacity - buf->len,
+                           "Proxy-Authorization: Basic %s\r\n", b64_creds);
+        if (written < 0 || (size_t)written >= buf->capacity - buf->len) {
+            return -MQTT_ERR_BUFFER_OVERFLOW;
+        }
+        buf->len += (size_t)written;
+    }
+
+    /* Add terminating CRLF */
+    written = snprintf((char *)buf->data + buf->len, buf->capacity - buf->len, "\r\n");
+    if (written < 0 || (size_t)written >= buf->capacity - buf->len) {
+        return -MQTT_ERR_BUFFER_OVERFLOW;
+    }
+    buf->len += (size_t)written;
+
+    return (ssize_t)buf->len;
+}
+
+int ws_parse_proxy_response(const uint8_t *data, size_t len)
+{
+    if (!data || len < 12) {
+        return 0;  /* Need more data */
+    }
+
+    /* Find end of headers */
+    const char *str = (const char *)data;
+    const char *end = strstr(str, "\r\n\r\n");
+    if (!end) {
+        if (len > 8192) {
+            return -MQTT_ERR_PROTOCOL;  /* Headers too large */
+        }
+        return 0;  /* Need more data */
+    }
+
+    size_t headers_len = (size_t)(end - str) + 4;
+
+    /* Check HTTP status line */
+    if (strncmp(str, "HTTP/1.1 ", 9) != 0 && strncmp(str, "HTTP/1.0 ", 9) != 0) {
+        return -MQTT_ERR_PROTOCOL;
+    }
+
+    /* Extract status code */
+    int status_code = atoi(str + 9);
+    if (status_code != 200) {
+        /* Proxy connect failed - could be 407 (auth required) or other errors */
+        return -MQTT_ERR_CONN_REFUSED;
+    }
+
+    return (int)headers_len;
+}
