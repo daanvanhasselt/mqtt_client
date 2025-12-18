@@ -1,108 +1,144 @@
 /**
  * @file mqtt_varint.c
  * @brief Variable-Length Integer Encoding/Decoding Implementation
+ *
+ * Optimized for common cases: most MQTT packets have small remaining lengths
+ * (1-2 bytes), so the encode/decode paths are optimized for these cases.
  */
 
 #include "mqtt_varint.h"
 #include <mqtt/mqtt_error.h>
+#include "mqtt_compiler.h"
 
 /* ========================================================================== */
 /* Encoding Implementation                                                    */
 /* ========================================================================== */
 
-int mqtt_varint_encode(uint32_t value, uint8_t *buf)
+MQTT_HOT
+int mqtt_varint_encode(uint32_t value, uint8_t *MQTT_RESTRICT buf)
 {
-    int bytes_written = 0;
-
-    /* Validate value is within range */
-    if (value > MQTT_VARINT_MAX_VALUE) {
-        return -1;
+    /* Fast path for small values (most common case in MQTT) */
+    if (MQTT_LIKELY(value < 128)) {
+        buf[0] = (uint8_t)value;
+        return 1;
     }
 
-    /* Encode 7 bits at a time, LSB first */
-    do {
-        uint8_t encoded_byte = value % 128;  /* Lower 7 bits */
-        value = value / 128;
+    /* Second most common: 2-byte encoding (up to 16383) */
+    if (MQTT_LIKELY(value < 16384)) {
+        buf[0] = (uint8_t)((value & 0x7F) | 0x80);
+        buf[1] = (uint8_t)(value >> 7);
+        return 2;
+    }
 
-        /* Set continuation bit if more bytes follow */
-        if (value > 0) {
-            encoded_byte |= 0x80;  /* Set bit 7 */
-        }
+    /* Less common: 3-byte encoding (up to 2097151) */
+    if (value < 2097152) {
+        buf[0] = (uint8_t)((value & 0x7F) | 0x80);
+        buf[1] = (uint8_t)(((value >> 7) & 0x7F) | 0x80);
+        buf[2] = (uint8_t)(value >> 14);
+        return 3;
+    }
 
-        buf[bytes_written++] = encoded_byte;
-    } while (value > 0);
+    /* Rare: 4-byte encoding */
+    if (MQTT_LIKELY(value <= MQTT_VARINT_MAX_VALUE)) {
+        buf[0] = (uint8_t)((value & 0x7F) | 0x80);
+        buf[1] = (uint8_t)(((value >> 7) & 0x7F) | 0x80);
+        buf[2] = (uint8_t)(((value >> 14) & 0x7F) | 0x80);
+        buf[3] = (uint8_t)(value >> 21);
+        return 4;
+    }
 
-    return bytes_written;
+    /* Value too large */
+    return -1;
 }
 
 /* ========================================================================== */
 /* Decoding Implementation                                                    */
 /* ========================================================================== */
 
-int mqtt_varint_decode(const uint8_t *buf, size_t max_len, uint32_t *value)
+MQTT_HOT
+int mqtt_varint_decode(const uint8_t *MQTT_RESTRICT buf, size_t max_len,
+                       uint32_t *MQTT_RESTRICT value)
 {
-    uint32_t decoded_value = 0;
-    uint32_t multiplier = 1;
-    int bytes_consumed = 0;
-    uint8_t current_byte;
+    uint8_t byte0;
 
-    /* Decode up to 4 bytes */
-    do {
-        /* Check if we have data available */
-        if (bytes_consumed >= (int)max_len) {
-            /* Incomplete - need more data */
-            return -1;
-        }
+    /* Need at least 1 byte */
+    if (MQTT_UNLIKELY(max_len == 0)) {
+        return -1;
+    }
 
-        /* Check if we've exceeded maximum length */
-        if (bytes_consumed >= MQTT_VARINT_MAX_BYTES) {
-            /* Malformed - more than 4 bytes */
-            return -1;
-        }
+    /* Fast path for 1-byte values (most common) */
+    byte0 = buf[0];
+    if (MQTT_LIKELY((byte0 & 0x80) == 0)) {
+        *value = byte0;
+        return 1;
+    }
 
-        current_byte = buf[bytes_consumed++];
+    /* Need at least 2 bytes */
+    if (MQTT_UNLIKELY(max_len < 2)) {
+        return -1;
+    }
 
-        /* Accumulate value from lower 7 bits */
-        decoded_value += (current_byte & 0x7F) * multiplier;
+    uint8_t byte1 = buf[1];
+    if (MQTT_LIKELY((byte1 & 0x80) == 0)) {
+        *value = (byte0 & 0x7F) | ((uint32_t)byte1 << 7);
+        return 2;
+    }
 
-        /* Check for overflow */
-        if (decoded_value > MQTT_VARINT_MAX_VALUE) {
-            /* Value too large */
-            return -1;
-        }
+    /* Need at least 3 bytes */
+    if (MQTT_UNLIKELY(max_len < 3)) {
+        return -1;
+    }
 
-        multiplier *= 128;
+    uint8_t byte2 = buf[2];
+    if ((byte2 & 0x80) == 0) {
+        *value = (byte0 & 0x7F) | ((uint32_t)(byte1 & 0x7F) << 7) |
+                 ((uint32_t)byte2 << 14);
+        return 3;
+    }
 
-        /* If multiplier overflows, encoding is malformed */
-        if (multiplier > (MQTT_VARINT_MAX_VALUE + 1)) {
-            return -1;
-        }
+    /* Need exactly 4 bytes */
+    if (MQTT_UNLIKELY(max_len < 4)) {
+        return -1;
+    }
 
-    } while ((current_byte & 0x80) != 0);  /* Continue while bit 7 is set */
+    uint8_t byte3 = buf[3];
 
-    *value = decoded_value;
-    return bytes_consumed;
+    /* 4-byte encoding: byte3 must NOT have continuation bit set */
+    if (MQTT_UNLIKELY(byte3 & 0x80)) {
+        return -1;  /* Malformed: more than 4 bytes */
+    }
+
+    uint32_t result = (byte0 & 0x7F) | ((uint32_t)(byte1 & 0x7F) << 7) |
+                      ((uint32_t)(byte2 & 0x7F) << 14) | ((uint32_t)byte3 << 21);
+
+    /* Check for overflow */
+    if (MQTT_UNLIKELY(result > MQTT_VARINT_MAX_VALUE)) {
+        return -1;
+    }
+
+    *value = result;
+    return 4;
 }
 
 /* ========================================================================== */
 /* Size Calculation                                                           */
 /* ========================================================================== */
 
+MQTT_CONST
 int mqtt_varint_size(uint32_t value)
 {
-    /* Validate value is within range */
-    if (value > MQTT_VARINT_MAX_VALUE) {
-        return -1;
-    }
-
-    /* Calculate number of bytes needed */
-    if (value < 128) {
+    /* Most common case first for better branch prediction */
+    if (MQTT_LIKELY(value < 128)) {
         return 1;
-    } else if (value < 16384) {          /* 128 * 128 */
+    }
+    if (MQTT_LIKELY(value < 16384)) {        /* 128 * 128 */
         return 2;
-    } else if (value < 2097152) {        /* 128 * 128 * 128 */
+    }
+    if (value < 2097152) {                    /* 128 * 128 * 128 */
         return 3;
-    } else {
+    }
+    if (MQTT_LIKELY(value <= MQTT_VARINT_MAX_VALUE)) {
         return 4;
     }
+    return -1;  /* Value too large */
 }
