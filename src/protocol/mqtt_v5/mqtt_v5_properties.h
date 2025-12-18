@@ -293,6 +293,15 @@ mqtt_error_t mqtt_property_decode(const uint8_t *data, size_t len,
 mqtt_property_type_t mqtt_property_get_type(mqtt_property_id_t id);
 
 /**
+ * @brief Find first property with given ID in list
+ *
+ * @param list Property list head
+ * @param id Property identifier to find
+ * @return Pointer to property if found, NULL otherwise
+ */
+mqtt_property_t *mqtt_property_find(mqtt_property_t *list, mqtt_property_id_t id);
+
+/**
  * @brief Check if property ID is valid
  *
  * @param id Property identifier

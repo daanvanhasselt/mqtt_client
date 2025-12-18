@@ -69,6 +69,17 @@ mqtt_property_type_t mqtt_property_get_type(mqtt_property_id_t id)
     return MQTT_PROP_TYPE_BYTE; /* Default fallback */
 }
 
+mqtt_property_t *mqtt_property_find(mqtt_property_t *list, mqtt_property_id_t id)
+{
+    while (list) {
+        if (list->id == id) {
+            return list;
+        }
+        list = list->next;
+    }
+    return NULL;
+}
+
 bool mqtt_property_id_valid(mqtt_property_id_t id)
 {
     for (size_t i = 0; i < PROPERTY_INFO_COUNT; i++) {
